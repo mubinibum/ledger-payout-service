@@ -1,30 +1,45 @@
 import { Kysely, PostgresDialect } from 'kysely';
-import { Pool } from 'pg';
+import pg from 'pg';
 import { loadEnv } from '../config/env.js';
+import type { Database } from '../db/schema.js';
+
+export type { Database } from '../db/schema.js';
 
 /**
- * Database schema types. Deliberately empty in M1 — no tables are defined yet. Later
- * milestones add interfaces here (accounts, ledger_entry, transaction, payout,
- * webhook_event, outbox, idempotency) alongside their migrations.
+ * Parse PostgreSQL `int8` (OID 20) as a JS `bigint` rather than the default `string`.
+ * Money in this service is integer minor units, and `bigint` keeps it exact end to end.
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface Database {}
+pg.types.setTypeParser(20, (value: string): bigint => BigInt(value));
 
-let pool: Pool | undefined;
+const { Pool } = pg;
+
+let pool: pg.Pool | undefined;
 let db: Kysely<Database> | undefined;
 
-function getPool(): Pool {
-  if (pool) return pool;
+function poolConfig(): pg.PoolConfig {
   const env = loadEnv();
-  pool = new Pool({
+  const base: pg.PoolConfig = {
+    max: env.DB_POOL_MAX,
+    connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
+  };
+  if (env.DATABASE_URL) {
+    return { ...base, connectionString: env.DATABASE_URL };
+  }
+  return {
+    ...base,
     host: env.PGHOST,
     port: env.PGPORT,
     database: env.PGDATABASE,
     user: env.PGUSER,
     password: env.PGPASSWORD,
-    max: 10,
-    connectionTimeoutMillis: env.READINESS_TIMEOUT_MS,
-  });
+  };
+}
+
+export function getPool(): pg.Pool {
+  if (pool) return pool;
+  pool = new Pool(poolConfig());
+  // Keep a stray idle-client error from crashing the process.
+  pool.on('error', () => undefined);
   return pool;
 }
 
