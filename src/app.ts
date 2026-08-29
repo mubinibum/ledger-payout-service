@@ -1,8 +1,14 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import { loadEnv } from './config/env.js';
+import { getDb } from './infra/db.js';
 import { loggerOptions } from './infra/logger.js';
 import { registerRequestContext, requestIdFactory } from './plugins/request-context.js';
 import { healthRoutes } from './modules/health/health.routes.js';
+import { AccountsService } from './modules/accounts/accounts.service.js';
+import { accountsRoutes } from './modules/accounts/accounts.routes.js';
+import { TransfersService } from './modules/transfers/transfers.service.js';
+import { transfersRoutes } from './modules/transfers/transfers.routes.js';
+import { sendError } from './http/errors.js';
 
 /**
  * Builds the Fastify application without starting a listener. Kept separate from
@@ -20,26 +26,38 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   registerRequestContext(app);
 
+  const db = getDb();
+  const accounts = new AccountsService(db);
+  const transfers = new TransfersService(db);
+
   await app.register(healthRoutes);
+  await app.register(accountsRoutes({ accounts }));
+  await app.register(transfersRoutes({ transfers }));
 
   app.get('/', () => ({
     name: 'ledger-payout-service',
-    status: 'skeleton',
-    milestone: 'M1',
+    status: 'in-development',
+    milestone: 'M2',
     env: env.NODE_ENV,
   }));
 
   app.setNotFoundHandler((request, reply) => {
-    void reply.code(404).send({ error: 'not_found', path: request.url });
+    void reply.code(404).send({
+      error: { code: 'not_found', message: 'route not found' },
+      requestId: request.id,
+    });
   });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
-    request.log.error({ err: error }, 'unhandled_error');
-    const status = error.statusCode ?? 500;
-    void reply.code(status).send({
-      error: status >= 500 ? 'internal_error' : (error.code ?? 'error'),
-      requestId: request.id,
-    });
+    // Fastify's own errors (malformed JSON, payload too large, …) carry a <500 statusCode.
+    if (typeof error.statusCode === 'number' && error.statusCode < 500) {
+      void reply.code(error.statusCode).send({
+        error: { code: error.code ?? 'bad_request', message: error.message },
+        requestId: request.id,
+      });
+      return;
+    }
+    void sendError(request, reply, error);
   });
 
   return app;
