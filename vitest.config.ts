@@ -1,12 +1,20 @@
 import { defineConfig } from 'vitest/config';
 
+/**
+ * Full suite: unit + integration + concurrency. Integration tests need PostgreSQL, which
+ * `test/global-setup.ts` provides via Testcontainers (one container for the whole run).
+ * A single fork keeps DB-touching tests strictly sequential against that shared database.
+ */
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['test/**/*.test.ts', 'src/**/*.test.ts'],
+    include: ['test/unit/**/*.test.ts', 'test/integration/**/*.test.ts', 'src/**/*.test.ts'],
     setupFiles: ['test/setup.ts'],
-    testTimeout: 15_000,
-    // Integration tests that need Postgres/Redis (via Testcontainers) are added in later
-    // milestones and tagged; M1 ships only a fast smoke test that needs no services.
+    globalSetup: ['test/global-setup.ts'],
+    testTimeout: 30_000,
+    hookTimeout: 120_000,
+    pool: 'forks',
+    poolOptions: { forks: { singleFork: true } },
+    fileParallelism: false,
   },
 });
