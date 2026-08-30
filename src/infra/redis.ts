@@ -1,23 +1,37 @@
-import { Redis } from 'ioredis';
+import { Redis, type RedisOptions } from 'ioredis';
 import { loadEnv } from '../config/env.js';
 
 let client: Redis | undefined;
 
+/** Connection target from REDIS_URL, or the REDIS_HOST/REDIS_PORT pair. */
+export function redisConnectionOptions(extra: RedisOptions = {}): RedisOptions {
+  const env = loadEnv();
+  if (env.REDIS_URL) {
+    const url = new URL(env.REDIS_URL);
+    return {
+      host: url.hostname,
+      port: url.port ? Number(url.port) : 6379,
+      ...(url.password ? { password: url.password } : {}),
+      ...extra,
+    };
+  }
+  return { host: env.REDIS_HOST, port: env.REDIS_PORT, ...extra };
+}
+
 /**
- * Lazily-created Redis client. `lazyConnect` keeps startup from blocking on Redis; the
- * connection is established on first use (or on an explicit `pingRedis`). Later milestones
- * use this for caching, the idempotency store, and the BullMQ backing connection.
+ * Lazily-created shared Redis client for cheap operations and the readiness probe.
+ * `lazyConnect` keeps startup from blocking on Redis. BullMQ needs its own connection with
+ * different retry semantics — see `src/infra/queue.ts`.
  */
 export function getRedis(): Redis {
   if (client) return client;
-  const env = loadEnv();
-  client = new Redis({
-    host: env.REDIS_HOST,
-    port: env.REDIS_PORT,
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-  });
+  client = new Redis(
+    redisConnectionOptions({
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+    }),
+  );
   // Prevent unhandled 'error' events from crashing the process before first use.
   client.on('error', () => undefined);
   return client;

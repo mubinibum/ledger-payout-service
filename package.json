@@ -1,6 +1,6 @@
 {
   "name": "ledger-payout-service",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "A generic, from-scratch double-entry ledger and payout service — an engineering demonstration, not a real financial service.",
   "type": "module",
@@ -42,17 +42,18 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",
-    "@testcontainers/postgresql": "^10.13.2",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@testcontainers/redis": "^11.14.0",
     "@types/node": "^20.17.6",
     "@types/pg": "^8.11.10",
     "eslint": "^9.15.0",
     "eslint-config-prettier": "^9.1.0",
     "pino-pretty": "^13.0.0",
     "prettier": "^3.3.3",
-    "testcontainers": "^10.13.2",
+    "testcontainers": "^11.14.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.15.0",
-    "vitest": "^2.1.5"
+    "vitest": "^3.2.7"
   }
 }

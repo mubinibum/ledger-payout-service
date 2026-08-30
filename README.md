@@ -262,8 +262,10 @@ metrics endpoint yet (M5).
 
 - Transfers over a single hot account serialise on that row (throughput ceiling per
   account).
-- Funding exists and is enabled by default for demo convenience; it must be disabled
-  (`ALLOW_FUNDING=false`) in any real deployment.
+- The funding endpoint (`POST /v1/accounts/:id/funding`) exists only for local development
+  and demos. It is **disabled by default** (`ALLOW_FUNDING` unset → `false`) and returns
+  `403 funding_disabled`; a developer must set `ALLOW_FUNDING=true` explicitly. It must
+  never be enabled in a real deployment.
 - Kysely table types are hand-maintained alongside migrations (no generation step).
 - `char(3)` currency codes are format-checked, not validated against ISO 4217; funding is
   limited to the seeded system-account currencies (`USD`, `IDR`, `EUR`, `SGD`).
