@@ -1,6 +1,9 @@
 # ADR 0017: Reconciliation policy
 
-- **Status:** accepted
+- **Status:** accepted; the `unknown`-after-`RECONCILE_MAX_ATTEMPTS` → release rule is
+  **superseded by [ADR 0018](0018-ambiguous-outcomes-and-manual-review.md)** (M3.1). An
+  `unknown` result now keeps the funds reserved and, at the attempt budget, routes the
+  payout to `manual_review` instead of releasing it.
 - **Date:** 2026-08-30
 
 ## Context
@@ -22,12 +25,14 @@ the operator controls — M3 ships no scheduler):
    - **failed** → release (idempotent).
    - **pending** → bump `reconcile_attempt_count`, push `next_reconcile_at` out; **funds
      stay reserved**.
-   - **unknown** (provider has no record) → reschedule until `RECONCILE_MAX_ATTEMPTS`, then
-     release as `reconciliation_not_found`.
+   - **unknown** (provider has no record) → **[revised by ADR 0018]** originally: reschedule
+     then release as `reconciliation_not_found` at `RECONCILE_MAX_ATTEMPTS`. Now: keep the
+     funds reserved and route to `manual_review` at the attempt budget (an `unknown` is only
+     released when the adapter's `capabilities().notFoundIsDefinitive` is true).
 
-**Invariant: a timeout or an internal deadline never releases funds.** Only a definite
-provider answer (`failed`, or exhausted `unknown`) does. This is why the worker parks
-ambiguous outcomes in `submitted` instead of failing them.
+**Invariant: a timeout or an internal deadline never releases funds.** Only a definitive
+provider answer does. This is why the worker parks ambiguous outcomes in `submitted`
+instead of failing them.
 
 The double-apply guard is the per-payout row lock inside every transition, not the claim —
 so a worker and a reconciliation run (or two reconciliation runs) racing on one payout
@@ -37,13 +42,12 @@ still produce exactly one settlement or release.
 
 - **Release on stale timeout** — simple, but wrong: it can double-pay a beneficiary whose
   payout actually succeeded at the provider.
-- **Never auto-resolve `unknown`** — funds could be reserved forever for a payout the
-  provider genuinely never received. The bounded-attempts-then-release policy is the
-  explicit, safe compromise, documented here and covered by a test.
+- **Auto-release `unknown` after N attempts** (the original decision) — rejected in ADR
+  0018: it can double-pay a beneficiary whose payout actually succeeded. ADR 0018 keeps the
+  funds reserved and hands the payout to an operator (`manual_review`) instead.
 
 ## Consequences
 
-- A stuck `submitted` payout is guaranteed to resolve within
-  `RECONCILE_MAX_ATTEMPTS × reconcile interval`.
-- `reconciliation_not_found` releases are a signal worth alerting on in a real deployment —
-  they mean the provider lost a request we thought it had.
+- A stuck `submitted` payout is guaranteed to be acted on within
+  `RECONCILE_MAX_ATTEMPTS × reconcile interval` — settled/released on a definitive answer,
+  otherwise moved to `manual_review` (ADR 0018), never left drifting.

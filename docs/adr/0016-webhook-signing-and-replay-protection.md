@@ -6,9 +6,9 @@
 ## Context
 
 The provider reports final payout outcomes via `POST /v1/webhooks/provider/payouts`. The
-endpoint is internet-facing in a real deployment: it must reject forged and replayed
-requests, and apply genuine ones exactly once even under duplicates, reordering, and
-concurrency.
+endpoint is internet-facing in a real deployment: it must reject forged and stale requests,
+and apply a genuine outcome **at most once** per payout even under duplicate deliveries,
+reordering, and concurrency.
 
 ## Decision
 

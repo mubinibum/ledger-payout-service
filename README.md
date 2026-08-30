@@ -3,10 +3,16 @@
 A generic, from-scratch **double-entry ledger and payout service**. It is an engineering
 demonstration — **not** a real financial service, and it moves **no real money**.
 
-> **Milestone: M3 — Payouts, transactional outbox, worker, signed webhooks & reconciliation.**
-> Implemented locally; unit-, integration-, failure-injection- and concurrency-tested
-> against real PostgreSQL and Redis. No real provider, no auth, no deployment — see
-> [Roadmap](#roadmap).
+> **Milestone: M3.1 — Payouts + ambiguous-outcome safety hardening.**
+> Payouts, transactional outbox, worker, signed webhooks, reconciliation, and a
+> `manual_review` flow for outcomes that cannot be resolved safely. Implemented locally;
+> unit-, integration-, failure-injection- and concurrency-tested against real PostgreSQL
+> and Redis. No real provider, no auth, no deployment — see [Roadmap](#roadmap).
+>
+> **Ambiguous outcomes never trigger automatic fund release.** A timeout, a reset, a 5xx,
+> an unknown status, a missing webhook, an exhausted retry/reconcile budget, or a
+> dead-letter with possible provider contact all send the payout to `manual_review` with
+> the funds still reserved — see [ADR 0018](docs/adr/0018-ambiguous-outcomes-and-manual-review.md).
 
 ---
 
@@ -30,11 +36,15 @@ demonstration — **not** a real financial service, and it moves **no real money
 - A **transactional outbox** + a **publisher** process: the payout job is written in the
   same DB transaction as the reservation and relayed to the queue at least once.
 - A **BullMQ worker** process that calls the provider (idempotently), classifies the
-  outcome (transient / permanent / ambiguous), retries with backoff, and dead-letters.
+  outcome (safe-to-retry / definitive / ambiguous), retries with backoff, and dead-letters.
 - **Signed inbound webhooks** (`HMAC-SHA256` over the raw body, timestamp window,
-  constant-time compare) with PostgreSQL-backed replay protection and exactly-once apply.
+  constant-time compare) with PostgreSQL-backed replay protection. Delivery is at-least-once;
+  the accounting effect is applied **at most once** per payout.
 - A **reconciliation** pass that resolves stale payouts by asking the provider directly —
-  and never releases funds on a timeout alone.
+  it settles / releases only on a **definitive** answer, and routes anything ambiguous to
+  `manual_review` with the funds reserved.
+- A **`manual_review`** state + local operator CLI (`npm run payout-admin`) for payouts an
+  ambiguous outcome left unresolvable.
 
 ## Architecture overview
 
@@ -94,7 +104,8 @@ the value path. [ADR 0006](docs/adr/0006-money-as-integer-minor-units.md).
 | **ledger_transaction** | `funding` \| `transfer` \| `payout_reservation` \| `payout_settlement` \| `payout_release`; groups the entries; immutable once committed. |
 | **ledger_entry** | `direction` (`debit`/`credit`) + **positive** `amount_minor` + `balance_after`. |
 | **account** | internal `id`, stable `external_id`, `type` (`user`/`system`), one `currency`, `status`, `allow_overdraft`, projected `balance_minor`. System accounts: `system:funding:<CUR>`, `system:payout_holding:<CUR>`, `system:provider_clearing:<CUR>`. |
-| **payout** | `external_id` (= provider idempotency key), `source_account_id`, `amount_minor`, `status`, the reservation / settlement / release ledger-transaction ids, `failure_category`, attempt counters. |
+| **payout** | `external_id` (= provider idempotency key), `source_account_id`, `amount_minor`, `status` (incl. `manual_review`), the reservation / settlement / release ledger-transaction ids, `failure_category`, `provider_contact`, `manual_review_reason`, `definitive_outcome_source`, `last_reconciliation_outcome`, attempt counters. CHECK: `manual_review` has no settlement and no release. |
+| **payout_resolution** | audit of every operator action on a `manual_review` payout: previous/new status, `resolution` (`succeeded`/`failed`/`resumed`/`rejected`), `reason`, `operator_reference`, resulting ledger-transaction id. |
 | **outbox_event** | `aggregate_type`/`aggregate_id`, `event_type`, `payload`, `status` (`pending`/`published`/`dead`), `attempt_count`, `available_at`. |
 | **provider_webhook_event** | unique `provider_event_id`, `payload_hash`, `result`. |
 | **idempotency_record** | unique `(scope, idempotency_key)`, `request_hash`, response snapshot. |
@@ -166,22 +177,37 @@ erDiagram
 stateDiagram-v2
     [*] --> requested : create (funds reserved)
     requested --> queued : outbox published
-    requested --> cancelled : cancel
+    requested --> cancelled : cancel (pre-submission)
     queued --> processing : worker picks up
-    queued --> cancelled : cancel
-    processing --> queued : transient error (retry)
-    processing --> submitted : provider accepted / ambiguous
+    queued --> cancelled : cancel (pre-submission)
+    requested --> failed : DLQ, provably never submitted
+    queued --> failed : DLQ, provably never submitted
+    processing --> queued : safe-to-retry error (proven not reached)
+    processing --> submitted : provider accepted / AMBIGUOUS outcome
     processing --> succeeded : provider immediate success
-    processing --> failed : permanent rejection / retries exhausted
-    submitted --> succeeded : webhook / reconciliation
-    submitted --> failed : webhook / reconciliation
+    processing --> failed : DEFINITIVE rejection
+    processing --> manual_review : DLQ with possible provider contact
+    submitted --> succeeded : definitive webhook / reconciliation
+    submitted --> failed : definitive webhook / reconciliation
+    submitted --> manual_review : reconciliation exhausted / ambiguous
+    manual_review --> succeeded : operator resolve-succeeded / definitive webhook
+    manual_review --> failed : operator resolve-failed / definitive webhook
+    manual_review --> submitted : operator resume-reconcile
     succeeded --> [*]
     failed --> [*]
     cancelled --> [*]
+
+    note right of manual_review
+        non-terminal · funds stay reserved
+        no automatic processing
+        not cancellable via the API
+    end note
 ```
 
-Full transition matrix and the transient/permanent/ambiguous taxonomy:
-[ADR 0012](docs/adr/0012-payout-state-machine.md).
+`manual_review` is the safety valve: funds stay in `payout_holding`, nothing runs
+automatically, and it leaves only through an explicit internal resolution. Full transition
+matrix: [ADR 0012](docs/adr/0012-payout-state-machine.md); ambiguous-outcome policy:
+[ADR 0018](docs/adr/0018-ambiguous-outcomes-and-manual-review.md).
 
 ## Payout flow (create → provider → outcome)
 
@@ -221,12 +247,15 @@ sequenceDiagram
         W->>DB: payout->submitted
         PR-->>API: signed webhook payout.succeeded / payout.failed
         API->>DB: settle / release (idempotent); record webhook receipt
-    else permanent rejection
+    else definitive rejection (4xx)
         PR-->>W: 4xx
         W->>DB: release: debit holding, credit source; payout->failed
-    else transient / ambiguous
-        W->>DB: transient -> queued (BullMQ retries); ambiguous -> submitted
-        Note over W,DB: reconciliation resolves anything left in submitted
+    else safe-to-retry (proven not reached)
+        W->>DB: payout->queued; throw -> BullMQ retries
+    else ambiguous (timeout / reset / 5xx / unknown)
+        W->>DB: payout->submitted (provider_contact=true); NO release
+        Note over W,DB: reconciliation asks the provider; a definitive answer
+        Note over W,DB: settles/releases, otherwise -> manual_review (funds reserved)
     end
 ```
 
@@ -248,22 +277,36 @@ An `outbox_event` is written **in the same transaction** as the payout reservati
 `publisher` process polls due `pending` events (`FOR UPDATE SKIP LOCKED`), enqueues each to
 BullMQ with **`jobId = outbox event id`**, and marks it published — all in one transaction.
 If the process dies between the enqueue and the commit, the row stays `pending` and is
-re-enqueued next cycle; BullMQ ignores the duplicate job id. **Delivery is at least once;
-every consumer is idempotent.** [ADR 0013](docs/adr/0013-transactional-outbox.md),
+re-enqueued next cycle; BullMQ ignores the duplicate job id. `OUTBOX_ENQUEUE_TIMEOUT_MS`
+bounds each `queue.add`, and `SET LOCAL idle_in_transaction_session_timeout` frees the row
+lock if Redis hangs. **Delivery is at least once; every consumer is idempotent; the
+accounting effect is at most once per payout.** It is **not** exactly-once.
+[ADR 0013](docs/adr/0013-transactional-outbox.md),
 [ADR 0014](docs/adr/0014-bullmq-at-least-once.md).
 
-## Worker: retry, classification, dead-letter
+## Provider outcome taxonomy & worker
 
-- **Transient** (connection refused, 429, 5xx): re-throw → BullMQ retries with exponential
-  backoff + jitter, up to `WORKER_MAX_ATTEMPTS`.
-- **Permanent** (4xx rejection): release funds, `failed`, no retry.
-- **Ambiguous** (timeout / reset after send): move to `submitted`, **no release** —
-  reconciliation owns it.
-- **Dead-letter** (retries exhausted): release **only if** the payout never reached
-  `submitted`; otherwise leave it for reconciliation.
-- Provider idempotency key = the payout's `external_id`, sent on every attempt, so a retry
-  never creates a second provider-side payout.
-  [ADR 0015](docs/adr/0015-provider-idempotency.md).
+`classifyTransportError` **defaults to `ambiguous`** — an unrecognised error is never
+guessed in our favour. A `ProviderCapabilities` object on the adapter (conservative
+defaults) is where a real adapter opts into stronger guarantees.
+
+| Bucket | Examples | Worker action |
+|---|---|---|
+| **safe-to-retry** | connection refused / DNS before send; 429 | re-throw → BullMQ retries with exp. backoff + jitter (`WORKER_MAX_ATTEMPTS`) |
+| **definitive failure** | explicit 4xx rejection | release funds, `failed`, no retry |
+| **definitive success** | provider returns succeeded | settle |
+| **ambiguous** | timeout, reset, 5xx (default), unparseable body, `unknown` right after submit | → `submitted`, **never a release** — reconciliation / a webhook / an operator resolves it |
+
+**Dead-letter** (BullMQ attempts exhausted):
+- status `requested`/`queued` **and** `provider_contact = false` → provably never submitted
+  → release as `transient_exhausted`;
+- anything else (`processing`, or `provider_contact` set) → **`manual_review`** (never a
+  release).
+
+Provider idempotency key = the payout's `external_id`, sent on every attempt — a retry
+never creates a second provider-side payout.
+[ADR 0015](docs/adr/0015-provider-idempotency.md),
+[ADR 0018](docs/adr/0018-ambiguous-outcomes-and-manual-review.md).
 
 ## Signed webhooks & replay protection
 
@@ -275,19 +318,52 @@ closed). Bad signature / stale timestamp → `401`.
 
 Application is one transaction: `INSERT ... ON CONFLICT DO NOTHING` on `provider_event_id`
 → a seen id with the same payload hash replays the first result (`200`), a different hash
-is `409`; a new event applies the settle/release transition (idempotent, terminal-wins) and
-records the result. Concurrent duplicates block on the unique id and replay.
+is `409`; a new event applies the settle/release transition (idempotent, terminal-wins).
+A **definitive** webhook can also resolve a `manual_review` payout that has no accounting
+effect yet. A webhook that **contradicts** an already-applied terminal outcome
+(`payout.failed` after settled, and vice versa) is logged (`payout_outcome_conflict`),
+metered, acknowledged (`200`, `result: conflict_ignored`), and produces **no second
+effect** — terminal wins, a human investigates.
 [ADR 0016](docs/adr/0016-webhook-signing-and-replay-protection.md).
 
 ## Reconciliation
 
-`npm run reconcile` runs one pass. It selects non-terminal payouts stale for longer than
-`RECONCILE_STALE_AFTER_SEC`, asks the provider `getPayoutStatus`, and: succeeded → settle;
-failed → release; pending → reschedule (funds stay reserved); unknown → reschedule until
-`RECONCILE_MAX_ATTEMPTS`, then release as `reconciliation_not_found`. **A timeout never
-releases funds** — only a definite provider answer does.
-[ADR 0017](docs/adr/0017-reconciliation-policy.md). M3 ships no scheduler; run it on a
-loop / systemd timer / cron of your own.
+`npm run reconcile` runs one pass. It selects non-terminal (`submitted` / `processing`)
+payouts stale for longer than `RECONCILE_STALE_AFTER_SEC`, asks the provider
+`getPayoutStatus`, and:
+
+- **succeeded** → settle; **failed (definitive)** → release;
+- **pending / accepted** → reschedule (funds stay reserved);
+- **unknown / not_found** → keep reserved. Release **only** if the adapter declares
+  `capabilities().notFoundIsDefinitive`;
+- `RECONCILE_MAX_ATTEMPTS` reached while still non-definitive → **`manual_review`**;
+- a malformed status or an internal error → reschedule; at the attempt budget →
+  `manual_review`.
+
+**A timeout, an internal deadline, or an exhausted attempt budget never releases funds** —
+only a definitive provider answer does.
+[ADR 0017](docs/adr/0017-reconciliation-policy.md),
+[ADR 0018](docs/adr/0018-ambiguous-outcomes-and-manual-review.md). No scheduler ships; run
+it on a loop / systemd timer / cron of your own.
+
+## Manual review
+
+Payouts an ambiguous outcome left unresolvable land in `manual_review`: non-terminal, funds
+still in `payout_holding`, no automatic processing, not cancellable via the API. Resolve
+them with the local operator CLI (there is no public admin endpoint — no authn/authz yet):
+
+```bash
+npm run payout-admin -- inspect <payoutId>
+npm run payout-admin -- resolve-succeeded <payoutId> --reason "confirmed paid in provider portal" --operator "ops-jane" --confirm
+npm run payout-admin -- resolve-failed    <payoutId> --reason "provider confirms no payment"      --operator "ops-jane" --confirm
+npm run payout-admin -- resume-reconcile  <payoutId> --reason "provider back online"              --operator "ops-jane"
+```
+
+`resolve-succeeded` settles, `resolve-failed` releases, `resume-reconcile` returns the
+payout to `submitted` with a fresh reconciliation budget. Each is idempotent; a
+contradictory resolution (`resolve-failed` on an already-settled payout) is rejected and
+recorded. Every resolution — including a rejected one — writes a `payout_resolutions` audit
+row (no credentials, no personal data).
 
 ## Idempotency behaviour
 
@@ -324,11 +400,13 @@ GET  /v1/ledger-transactions/:id
 # payouts (M3)
 POST /v1/payouts                         Idempotency-Key; { sourceAccountId, amount, currency, externalId?, reference?, metadata? } -> 201 { payout }
 GET  /v1/payouts/:id                     -> 200 { payout }
-GET  /v1/payouts?status=&limit=&cursor=  -> 200 { payouts, nextCursor }
-POST /v1/payouts/:id/cancel              -> 200 { payout }   (only while requested/queued)
+GET  /v1/payouts?status=&limit=&cursor=  -> 200 { payouts, nextCursor }   (status can be manual_review)
+POST /v1/payouts/:id/cancel              -> 200 { payout }   (only requested/queued AND no provider contact)
 
 # webhooks (M3)
 POST /v1/webhooks/provider/payouts       signed; -> 200 { received, result, replay }
+
+# there is NO public admin/resolution endpoint — manual review is CLI-only (npm run payout-admin)
 ```
 
 Example — fund, pay out, watch it settle:
@@ -352,7 +430,8 @@ curl -s localhost:3000/v1/payouts/$PAYOUT | jq .payout.status
 
 Payout error codes add: `payout_not_found` (404), `payout_not_cancellable` (409),
 `invalid_payout_transition` (409), `webhook_not_configured` (503),
-`webhook_signature_invalid` / `webhook_timestamp_invalid` (401), `webhook_conflict` (409).
+`webhook_signature_invalid` / `webhook_timestamp_invalid` (401), `webhook_conflict` (409),
+`manual_review_not_applicable` (409), `contradictory_resolution` (409).
 
 ## Local setup (multi-process)
 
@@ -373,6 +452,7 @@ npm run dev:publisher         # outbox -> queue
 npm run dev:worker            # queue -> provider
 npm run dev:mock-provider     # the fake provider   http://127.0.0.1:4000
 npm run reconcile             # one reconciliation pass (repeat on your own schedule)
+npm run payout-admin -- inspect <payoutId>   # operator CLI for the manual_review queue
 ```
 
 ### Migrations
@@ -385,8 +465,8 @@ npm run migrate:status
 
 Static TypeScript modules (`src/db/migrations/`), run by Kysely's `Migrator` in filename
 order — identical under `tsx` and the compiled build. Validated: fresh DB from zero
-(M1→M2→M3); an existing M2 DB upgrades to M3; re-running `up` is a no-op; full `down`→`up`
-round-trips; the test schema is produced by the same migrations as production.
+(M1→M2→M3→M3.1); an existing M3 DB upgrades to M3.1; re-running `up` is a no-op; full
+`down`→`up` round-trips; the test schema is produced by the same migrations as production.
 
 ### Running tests
 
@@ -413,20 +493,50 @@ and raw stack traces are never logged or returned.
 
 In-process counters/gauges (`src/infra/metrics.ts`, `metrics.snapshot()`): payouts created
 & by state, payout transitions, settlements/releases, provider attempts & error classes,
-outbox published / retried / pending / oldest-age / dead, worker jobs / retries / DLQ,
-webhook accepted / rejected / replayed, reconciliation runs & outcomes. Naming follows
-Prometheus conventions; there is no `/metrics` endpoint yet (M5).
+**ambiguous outcomes, manual-review entered / age / backlog, manual resolutions,
+provider-outcome conflicts, payouts reserved beyond threshold, dead outbox events with a
+still-reserved payout**, outbox published / retried / pending / dead, worker jobs / retries
+/ DLQ, webhook accepted / rejected / replayed, reconciliation runs & outcomes. Naming
+follows Prometheus conventions; there is no `/metrics` endpoint yet (M4).
 
-## Known limitations (M3)
+## Runbook draft — the `manual_review` queue
+
+`manual_review` payouts hold reserved funds and never resolve on their own. Watch
+`payout_manual_review`, `payout_manual_review_oldest_seconds`,
+`payouts_reserved_beyond_threshold`, `payout_outcome_conflicts_total`, and
+`outbox_dead_with_reserved_payout`.
+
+For each payout: `npm run payout-admin -- inspect <id>` (status, `manual_review_reason`,
+`last_reconciliation_outcome`, `provider_contact`, ledger-transaction ids, audit trail),
+then confirm the true outcome **with the provider directly** (dashboard / support), then:
+
+| Provider says | Action |
+|---|---|
+| the payout was **paid** | `resolve-succeeded <id> --reason "…" --operator "…" --confirm` |
+| the payout **failed / will not pay** | `resolve-failed <id> --reason "…" --operator "…" --confirm` |
+| provider was transiently down, now healthy, status is knowable | `resume-reconcile <id> --reason "…" --operator "…"` |
+
+`outbox_dead_with_reserved_payout > 0` → a `payout.requested` event exhausted its publish
+retries. Fix Redis, then re-arm the event (`UPDATE outbox_events SET status='pending',
+attempt_count=0, available_at=now() WHERE …`) so the publisher picks it up.
+
+`payout_outcome_conflicts_total` increasing → the provider sent contradictory terminal
+outcomes for a payout. The first terminal effect stands; investigate the provider side.
+
+## Known limitations (M3.1)
 
 - Payouts over one hot source (or the shared per-currency holding account) serialise on
   that row — a throughput ceiling per account, as with M2 transfers.
 - No real provider adapter, no external credentials — only the local mock.
 - `reconcile` and the `publisher` loop have no built-in scheduler; you run them.
-- The publisher holds the outbox row lock across the `queue.add` call; a very slow Redis
-  slows the relay (it never corrupts it).
-- `unknown`-after-`RECONCILE_MAX_ATTEMPTS` releases funds — an explicit, bounded policy
-  (ADR 0017); worth alerting on in a real system.
+- The publisher holds the outbox row lock across `queue.add`; a very slow Redis slows the
+  relay (bounded by `OUTBOX_ENQUEUE_TIMEOUT_MS` + `idle_in_transaction_session_timeout`, so
+  it never corrupts or stalls indefinitely).
+- `manual_review` needs a human. In a real deployment it would have an authenticated admin
+  API and an on-call rotation; here it is a local CLI only.
+- The `queued`/`requested`-and-`!provider_contact` dead-letter auto-release relies on the
+  worker always reaching `processing` before any provider call — true by construction, and
+  gated a second time by the `provider_contact` marker.
 - Kysely table types are hand-maintained. `char(3)` currencies are format-checked, not
   ISO-4217-validated; payouts are limited to the seeded currencies (`USD`, `IDR`, `EUR`,
   `SGD`).
@@ -434,13 +544,14 @@ Prometheus conventions; there is no `/metrics` endpoint yet (M5).
 - Committed ledger transactions are immutable — corrections would be new reversing
   transactions (not built).
 - Dev-only `npm audit` reports one moderate advisory in the `testcontainers → dockerode →
-  uuid` chain; no production-dependency vulnerabilities. See the M3 report.
+  uuid` chain; no production-dependency vulnerabilities. See the M3.1 report.
 
-## Not in M3
+## Not in M3.1
 
 Real payout provider · external credentials · multi-tenancy · end-user authentication ·
-multi-currency conversion · fee engine · a `/metrics` endpoint · Grafana / tracing ·
-deployment manifests · a public demo URL · a website.
+authenticated admin / resolution API · multi-currency conversion · fee engine · a
+`/metrics` endpoint · Grafana / tracing · deployment manifests · a public demo URL · a
+website.
 
 ## Roadmap
 
@@ -448,8 +559,9 @@ deployment manifests · a public demo URL · a website.
 |---|---|
 | M1 (done) | Skeleton: TS strict, lint/format, env schema, Docker Compose, health/readiness, CI, ADRs |
 | M2 (done) | Accounts, double-entry ledger, idempotent transfers, concurrency invariant test, migrations |
-| **M3 (done)** | Payout state machine + reservation accounting, transactional outbox + publisher, BullMQ worker, mock provider, signed webhooks + replay protection, reconciliation |
-| M4 | Public-readiness pass: OpenAPI, threat model, CI security scans, `/metrics` endpoint + runbook |
+| M3 (done) | Payout state machine + reservation accounting, transactional outbox + publisher, BullMQ worker, mock provider, signed webhooks + replay protection, reconciliation |
+| **M3.1 (done)** | Ambiguous-outcome safety: `manual_review` state, "never auto-release on ambiguous", provider capability contract, operator CLI + audit, hardened outbox enqueue |
+| M4 | Public-readiness pass: OpenAPI, threat model, CI security scans, `/metrics` endpoint + full runbook, authenticated admin API for manual review |
 | M5 | Deploy to one managed host, public demo URL |
 
 ## Security disclaimer
