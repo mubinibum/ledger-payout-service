@@ -5,6 +5,7 @@ import {
   PAYOUT_STATUSES,
   assertTransition,
   canTransition,
+  isManualReview,
   isTerminal,
 } from '../../src/domain/payout-state.js';
 
@@ -23,14 +24,21 @@ describe('payout state machine', () => {
       ['requested', 'queued'],
       ['requested', 'processing'],
       ['requested', 'cancelled'],
+      ['requested', 'manual_review'],
       ['queued', 'processing'],
       ['queued', 'cancelled'],
+      ['queued', 'manual_review'],
       ['processing', 'submitted'],
       ['processing', 'succeeded'],
       ['processing', 'failed'],
       ['processing', 'queued'],
+      ['processing', 'manual_review'],
       ['submitted', 'succeeded'],
       ['submitted', 'failed'],
+      ['submitted', 'manual_review'],
+      ['manual_review', 'succeeded'],
+      ['manual_review', 'failed'],
+      ['manual_review', 'submitted'],
     ];
     for (const [from, to] of ok) {
       expect(canTransition(from as never, to as never), `${from}->${to}`).toBe(true);
@@ -47,6 +55,11 @@ describe('payout state machine', () => {
       ['succeeded', 'failed'],
       ['failed', 'succeeded'],
       ['cancelled', 'processing'],
+      // manual_review is left only by an explicit internal resolution
+      ['manual_review', 'requested'],
+      ['manual_review', 'queued'],
+      ['manual_review', 'cancelled'],
+      ['manual_review', 'processing'],
     ];
     for (const [from, to] of bad) {
       expect(canTransition(from as never, to as never), `${from}->${to}`).toBe(false);
@@ -54,6 +67,12 @@ describe('payout state machine', () => {
         InvalidPayoutTransitionError,
       );
     }
+  });
+
+  it('manual_review is non-terminal and non-cancellable', () => {
+    expect(isTerminal('manual_review')).toBe(false);
+    expect(isManualReview('manual_review')).toBe(true);
+    expect(CANCELLABLE_STATUSES.has('manual_review')).toBe(false);
   });
 
   it('terminal states permit no outgoing transition', () => {

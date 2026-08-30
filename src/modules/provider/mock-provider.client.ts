@@ -1,17 +1,25 @@
 import { loadEnv } from '../../config/env.js';
 import {
+  CONSERVATIVE_CAPABILITIES,
   ProviderError,
   classifyTransportError,
   type FailureCategory,
+  type ProviderCapabilities,
   type ProviderResult,
 } from '../../domain/provider-outcome.js';
 import type { CreatePayoutRequest, ProviderPort } from './provider.port.js';
 
 /**
- * HTTP adapter for the local mock payout provider. Transport failures are classified
- * (`transient` vs `ambiguous`); explicit provider rejections become
- * `ProviderError('permanent')`. A timeout is treated as **ambiguous** — the provider may
- * have received the request — so the caller must not release funds on it.
+ * HTTP adapter for the local mock payout provider.
+ *
+ * Classification is CONSERVATIVE by default:
+ *  - connection refused / DNS  → transient  (proven the request never landed)
+ *  - timeout / reset / unknown → ambiguous  (the provider MAY have received it → no release)
+ *  - HTTP 5xx                  → ambiguous  (unless `fivexxIsDefinitiveNonProcessing`)
+ *  - HTTP 429                  → transient  (rate-limited before processing)
+ *  - an explicit 4xx body      → ProviderError('permanent') — a definitive rejection
+ *  - unparseable success body  → ambiguous
+ *  - GET 404 (not_found)       → `unknown`  (ambiguity resolved by `notFoundIsDefinitive`)
  */
 interface WireResult {
   status: 'accepted' | 'succeeded' | 'failed' | 'pending' | 'not_found';
@@ -38,29 +46,43 @@ function toResult(wire: WireResult): ProviderResult {
   }
 }
 
+export interface MockProviderClientOptions {
+  baseUrl?: string;
+  timeoutMs?: number;
+  capabilities?: Partial<ProviderCapabilities>;
+}
+
 export class MockProviderClient implements ProviderPort {
-  constructor(
-    private readonly baseUrl = loadEnv().PROVIDER_BASE_URL,
-    private readonly timeoutMs = loadEnv().PROVIDER_TIMEOUT_MS,
-  ) {}
+  private readonly baseUrl: string;
+  private readonly timeoutMs: number;
+  private readonly caps: ProviderCapabilities;
+
+  constructor(opts: MockProviderClientOptions = {}) {
+    const env = loadEnv();
+    this.baseUrl = opts.baseUrl ?? env.PROVIDER_BASE_URL;
+    this.timeoutMs = opts.timeoutMs ?? env.PROVIDER_TIMEOUT_MS;
+    this.caps = { ...CONSERVATIVE_CAPABILITIES, ...opts.capabilities };
+  }
+
+  capabilities(): ProviderCapabilities {
+    return this.caps;
+  }
 
   async createPayout(req: CreatePayoutRequest): Promise<ProviderResult> {
-    const wire = await this.request('POST', '/payouts', {
-      idempotencyKey: req.idempotencyKey,
-      amountMinor: req.amountMinor.toString(10),
-      currency: req.currency,
-      reference: req.reference,
-    });
-    return toResult(wire);
+    return toResult(
+      await this.request('POST', '/payouts', {
+        idempotencyKey: req.idempotencyKey,
+        amountMinor: req.amountMinor.toString(10),
+        currency: req.currency,
+        reference: req.reference,
+      }),
+    );
   }
 
   async getPayoutStatus(idempotencyKey: string): Promise<ProviderResult> {
-    const wire = await this.request(
-      'GET',
-      `/payouts/${encodeURIComponent(idempotencyKey)}`,
-      undefined,
+    return toResult(
+      await this.request('GET', `/payouts/${encodeURIComponent(idempotencyKey)}`, undefined),
     );
-    return toResult(wire);
   }
 
   private async request(
@@ -87,8 +109,14 @@ export class MockProviderClient implements ProviderPort {
       clearTimeout(timer);
     }
 
-    if (res.status === 429 || res.status >= 500) {
-      throw new ProviderError('transient', `provider responded ${res.status}`);
+    if (res.status === 429) {
+      throw new ProviderError('transient', 'provider responded 429');
+    }
+    if (res.status >= 500) {
+      throw new ProviderError(
+        this.caps.fivexxIsDefinitiveNonProcessing ? 'transient' : 'ambiguous',
+        `provider responded ${res.status}`,
+      );
     }
     if (res.status === 404 && method === 'GET') {
       return { status: 'not_found' };
@@ -101,7 +129,17 @@ export class MockProviderClient implements ProviderPort {
         payload.failureCategory ?? 'permanent_rejection',
       );
     }
-    return (await res.json()) as WireResult;
+
+    try {
+      const parsed = (await res.json()) as WireResult;
+      if (!parsed || typeof parsed.status !== 'string') {
+        throw new Error('missing status');
+      }
+      return parsed;
+    } catch {
+      // A 2xx we cannot parse — the provider may have acted; treat as ambiguous.
+      throw new ProviderError('ambiguous', 'provider returned an unparseable response');
+    }
   }
 }
 

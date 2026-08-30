@@ -8,13 +8,16 @@ import {
   outboxPublisherOptionsFromEnv,
 } from './modules/outbox/outbox.publisher.js';
 import { payoutOutboxSideEffect } from './composition.js';
+import { refreshPayoutSafetyGauges } from './modules/payouts/payout-metrics.js';
 
 /** Entry point: the transactional-outbox relay. Run as its own process. */
 function main(): void {
   loadEnv();
-  const publisher = new OutboxPublisher(getDb(), bullEnqueuer(), {
+  const db = getDb();
+  const publisher = new OutboxPublisher(db, bullEnqueuer(), {
     ...outboxPublisherOptionsFromEnv(),
     sideEffect: payoutOutboxSideEffect(),
+    afterCycle: () => refreshPayoutSafetyGauges(db),
   });
 
   onShutdown(async () => {

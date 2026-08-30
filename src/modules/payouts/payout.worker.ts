@@ -30,11 +30,13 @@ export interface JobContext {
 }
 
 /**
- * Processes one payout job. Safe to run more than once for the same payout — every step is
- * idempotent and terminal / submitted payouts are left alone. A transient failure re-throws
- * so BullMQ retries; a permanent failure releases the funds; an ambiguous outcome moves the
- * payout to `submitted` and leaves resolution to a webhook or reconciliation (never a
- * release).
+ * Processes one payout job. Safe to run more than once — every step is idempotent and
+ * terminal / submitted / manual_review payouts are left alone.
+ *
+ *  - transient error (provably never reached provider) → back to `queued`, BullMQ retries
+ *  - permanent rejection (definitive)                  → release funds, `failed`
+ *  - ambiguous outcome (may have reached provider)     → `submitted`, NEVER a release
+ *  - `unknown` right after createPayout                → `submitted` (ambiguous), NOT retry
  */
 export async function processPayoutJob(deps: PayoutWorkerDeps, ctx: JobContext): Promise<void> {
   const { payoutId } = ctx;
@@ -43,7 +45,11 @@ export async function processPayoutJob(deps: PayoutWorkerDeps, ctx: JobContext):
     logger.warn({ payoutId }, 'payout_job_unknown_payout');
     return;
   }
-  if (isTerminal(payout.status) || payout.status === 'submitted') {
+  if (
+    isTerminal(payout.status) ||
+    payout.status === 'submitted' ||
+    payout.status === 'manual_review'
+  ) {
     logger.debug({ payoutId, status: payout.status }, 'payout_job_noop');
     return;
   }
@@ -73,15 +79,22 @@ export async function processPayoutJob(deps: PayoutWorkerDeps, ctx: JobContext):
         err instanceof ProviderError && err.providerCategory
           ? err.providerCategory
           : 'permanent_rejection';
-      await deps.service.applyProviderFailure(payoutId, { category, source: 'worker' });
+      await deps.service.applyProviderFailure(payoutId, {
+        category,
+        source: 'worker',
+        definitiveSource: 'provider_rejection',
+      });
       return;
     }
     if (classification === 'ambiguous') {
-      // The provider may have received the request — do NOT release. Reconciliation resolves.
+      // The provider MAY have received the request — do NOT release. `submitted` sets the
+      // provider_contact marker; reconciliation / a webhook resolves it, or it ends up in
+      // manual_review. Never an automatic release.
+      metrics.providerAmbiguousOutcomesTotal.inc({ source: 'worker_create' });
       await deps.service.markSubmitted(payoutId, { ambiguous: true });
       return;
     }
-    // transient: back to queued, let BullMQ retry
+    // transient: provably never reached the provider → back to queued, let BullMQ retry
     await deps.service.markRetrying(payoutId);
     metrics.workerRetryTotal.inc();
     throw err instanceof Error ? err : new Error('transient provider error');
@@ -97,39 +110,56 @@ export async function processPayoutJob(deps: PayoutWorkerDeps, ctx: JobContext):
       await deps.service.applyProviderSuccess(payoutId, {
         providerPayoutId: result.providerPayoutId,
         source: 'worker',
+        definitiveSource: 'provider_status',
       });
       return;
     case 'failed':
       await deps.service.applyProviderFailure(payoutId, {
         category: result.category,
         source: 'worker',
+        definitiveSource: 'provider_status',
       });
       return;
     case 'unknown':
-      // We just called createPayout and the provider has no record — treat as transient.
-      await deps.service.markRetrying(payoutId);
-      throw new Error('provider returned unknown for a freshly submitted payout');
+      // We just called createPayout and the provider reports no record. This is ambiguous
+      // (the call may still have landed) — park it as `submitted`, do NOT retry-forever.
+      metrics.providerAmbiguousOutcomesTotal.inc({ source: 'worker_unknown' });
+      await deps.service.markSubmitted(payoutId, { ambiguous: true });
+      return;
   }
 }
 
-/** When BullMQ exhausts every attempt, release only if the provider never took the request. */
+/**
+ * Called when BullMQ exhausts every attempt for a job.
+ *
+ * SAFETY (ADR 0018): auto-release ONLY when the payout is provably before any provider
+ * submission — status `requested`/`queued` (the worker always moves to `processing` before
+ * the provider call, and only returns to `queued` after a proven-not-reached transient
+ * error) AND no `provider_contact` marker. Anything else → `manual_review`.
+ */
 export async function handleDeadLetter(deps: PayoutWorkerDeps, payoutId: string): Promise<void> {
   metrics.workerDlqTotal.inc();
   const payout = await findPayoutById(deps.db, payoutId);
   if (!payout) return;
-  if (
-    payout.status === 'requested' ||
-    payout.status === 'queued' ||
-    payout.status === 'processing'
-  ) {
+
+  if (isTerminal(payout.status) || payout.status === 'manual_review') {
+    return;
+  }
+  if (payout.status === 'submitted') {
+    logger.warn({ payoutId }, 'payout_dead_letter_left_for_reconcile');
+    return;
+  }
+  if ((payout.status === 'requested' || payout.status === 'queued') && !payout.provider_contact) {
     await deps.service.applyProviderFailure(payoutId, {
       category: 'transient_exhausted',
       source: 'worker',
+      definitiveSource: 'worker',
     });
-    logger.warn({ payoutId }, 'payout_dead_letter_released');
-  } else {
-    logger.warn({ payoutId, status: payout.status }, 'payout_dead_letter_left_for_reconcile');
+    logger.warn({ payoutId }, 'payout_dead_letter_released_never_reached_provider');
+    return;
   }
+  // processing, or provider_contact set → provider contact is possible → operator decides.
+  await deps.service.markManualReview(payoutId, 'dlq_provider_contact_possible');
 }
 
 /** Wires `processPayoutJob` to a real BullMQ worker. Used by the worker process. */
@@ -138,12 +168,24 @@ export function createPayoutWorker(deps: PayoutWorkerDeps): Worker<PayoutJobData
   const worker = new Worker<PayoutJobData>(
     env.PAYOUT_QUEUE_NAME,
     async (job: Job<PayoutJobData>) => {
-      await processPayoutJob(deps, {
-        payoutId: job.data.payoutId,
-        attemptsMade: job.attemptsMade,
-        maxAttempts: job.opts.attempts ?? env.WORKER_MAX_ATTEMPTS,
-      });
-      metrics.workerJobsTotal.inc({ result: 'completed' });
+      try {
+        await processPayoutJob(deps, {
+          payoutId: job.data.payoutId,
+          attemptsMade: job.attemptsMade,
+          maxAttempts: job.opts.attempts ?? env.WORKER_MAX_ATTEMPTS,
+        });
+        metrics.workerJobsTotal.inc({ result: 'completed' });
+      } catch (err) {
+        // On the final attempt an unexpected (non-transient) error would otherwise just
+        // DLQ; route the payout to manual_review from here so it is never left stuck.
+        const maxAttempts = job.opts.attempts ?? env.WORKER_MAX_ATTEMPTS;
+        if (job.attemptsMade + 1 >= maxAttempts && !isProbablyTransient(err)) {
+          await deps.service
+            .markManualReview(job.data.payoutId, 'worker_unexpected_error')
+            .catch(() => undefined);
+        }
+        throw err;
+      }
     },
     {
       connection: bullConnection(),
@@ -168,4 +210,10 @@ export function createPayoutWorker(deps: PayoutWorkerDeps): Worker<PayoutJobData
   });
 
   return worker;
+}
+
+function isProbablyTransient(err: unknown): boolean {
+  return err instanceof ProviderError
+    ? err.classification === 'transient'
+    : classifyTransportError(err) === 'transient';
 }

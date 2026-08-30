@@ -18,9 +18,11 @@ type Scenario =
   | { mode: 'accept_then_pending' } // GET keeps returning pending until _control/complete
   | { mode: 'permanent_rejection'; category?: string }
   | { mode: 'transient_5xx'; times: number }
+  | { mode: 'server_5xx' } // persistent 500 — ambiguous for a conservative adapter
   | { mode: 'rate_limit'; times: number }
   | { mode: 'timeout' } // never stores the payout, just hangs past the client timeout
-  | { mode: 'ambiguous_timeout' }; // stores the payout, THEN hangs
+  | { mode: 'ambiguous_timeout' } // stores the payout, THEN hangs
+  | { mode: 'malformed_response' }; // 2xx with no `status` field (POST and GET)
 
 type StoredState = 'accepted' | 'pending' | 'succeeded' | 'failed';
 interface Stored {
@@ -83,12 +85,16 @@ export function buildMockProvider(opts: MockProviderOptions): FastifyInstance {
         if (seen <= scenario.times)
           return reply.code(503).send({ error: 'temporarily unavailable' });
         break;
+      case 'server_5xx':
+        return reply.code(500).send({ error: 'internal error' });
       case 'rate_limit':
         if (seen <= scenario.times) return reply.code(429).send({ error: 'rate limited' });
         break;
       case 'timeout':
         await sleep(hangMs);
         return reply.send({ status: 'accepted', providerPayoutId: 'late' });
+      case 'malformed_response':
+        return reply.send({ garbage: true });
       case 'permanent_rejection':
         return reply
           .code(422)
@@ -123,6 +129,12 @@ export function buildMockProvider(opts: MockProviderOptions): FastifyInstance {
 
   app.get('/payouts/:key', async (request, reply) => {
     const { key } = request.params as { key: string };
+    if (scenarioFor(key).mode === 'malformed_response') {
+      return reply.send({ garbage: true });
+    }
+    if (scenarioFor(key).mode === 'server_5xx') {
+      return reply.code(500).send({ error: 'internal error' });
+    }
     const stored = store.get(key);
     if (!stored) return reply.code(404).send({ status: 'not_found' });
     return reply.send(wireFor(stored));

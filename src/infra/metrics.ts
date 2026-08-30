@@ -64,6 +64,16 @@ const registry = {
   payoutSettlementsTotal: new Counter('payout_settlements_total'), // labels: source
   payoutReleasesTotal: new Counter('payout_releases_total'), // labels: source,category
 
+  // M3.1 — ambiguous-payout safety
+  payoutManualReviewEnteredTotal: new Counter('payout_manual_review_entered_total'), // labels: reason
+  payoutManualResolutionsTotal: new Counter('payout_manual_resolutions_total'), // labels: resolution,outcome
+  payoutOutcomeConflictsTotal: new Counter('payout_outcome_conflicts_total'), // labels: current,attempted
+  providerAmbiguousOutcomesTotal: new Counter('provider_ambiguous_outcomes_total'), // labels: source
+  payoutManualReviewGauge: new Gauge('payout_manual_review'),
+  payoutManualReviewOldestSecondsGauge: new Gauge('payout_manual_review_oldest_seconds'),
+  payoutsReservedBeyondThresholdGauge: new Gauge('payouts_reserved_beyond_threshold'),
+  outboxDeadWithReservedPayoutGauge: new Gauge('outbox_dead_with_reserved_payout'),
+
   // M3 — provider
   providerAttemptsTotal: new Counter('provider_attempts_total'), // labels: outcome
   providerErrorsTotal: new Counter('provider_errors_total'), // labels: classification

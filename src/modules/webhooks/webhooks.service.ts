@@ -99,17 +99,29 @@ export class WebhookService {
 
       let result: string;
       if (parsed.type === 'payout.succeeded') {
-        const updated = await settlePayoutWithin(trx, payout.id, {
+        const { effect } = await settlePayoutWithin(trx, payout.id, {
           providerPayoutId: parsed.providerPayoutId ?? null,
           source: 'webhook',
+          definitiveSource: 'webhook',
         });
-        result = updated.status === 'succeeded' ? 'applied_success' : 'noop';
+        result =
+          effect === 'applied'
+            ? 'applied_success'
+            : effect === 'conflict'
+              ? 'conflict_ignored'
+              : 'noop';
       } else {
-        const updated = await releasePayoutWithin(trx, payout.id, {
+        const { effect } = await releasePayoutWithin(trx, payout.id, {
           category: 'permanent_rejection',
           source: 'webhook',
+          definitiveSource: 'webhook',
         });
-        result = updated.status === 'failed' ? 'applied_failure' : 'noop_terminal';
+        result =
+          effect === 'applied'
+            ? 'applied_failure'
+            : effect === 'conflict'
+              ? 'conflict_ignored'
+              : 'noop_terminal';
       }
       await markWebhookProcessed(trx, inserted.id, result);
       return { result, replay: false };
@@ -117,6 +129,8 @@ export class WebhookService {
 
     if (outcome.replay) {
       metrics.webhookReplayedTotal.inc();
+    } else if (outcome.result === 'conflict_ignored') {
+      metrics.webhookAcceptedTotal.inc({ event_type: `${parsed.type}:conflict` });
     } else {
       metrics.webhookAcceptedTotal.inc({ event_type: parsed.type });
     }

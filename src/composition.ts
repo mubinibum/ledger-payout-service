@@ -5,6 +5,7 @@ import { TransfersService } from './modules/transfers/transfers.service.js';
 import { PayoutsService } from './modules/payouts/payouts.service.js';
 import { markQueuedWithin } from './modules/payouts/payout-transitions.js';
 import { ReconciliationService } from './modules/payouts/reconciliation.service.js';
+import { ManualReviewService } from './modules/payouts/manual-review.service.js';
 import { WebhookService } from './modules/webhooks/webhooks.service.js';
 import { MockProviderClient } from './modules/provider/mock-provider.client.js';
 import type { ProviderPort } from './modules/provider/provider.port.js';
@@ -22,6 +23,7 @@ export interface Services {
   payouts: PayoutsService;
   webhooks: WebhookService;
   reconciliation: ReconciliationService;
+  manualReview: ManualReviewService;
   provider: ProviderPort;
 }
 
@@ -36,7 +38,8 @@ export function buildServices(
     transfers: new TransfersService(db),
     payouts,
     webhooks: new WebhookService(db),
-    reconciliation: new ReconciliationService(payouts, provider),
+    reconciliation: new ReconciliationService(db, payouts, provider),
+    manualReview: new ManualReviewService(db, payouts),
     provider,
   };
 }

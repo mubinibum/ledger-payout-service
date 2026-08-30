@@ -24,7 +24,10 @@ export type DomainErrorCode =
   | 'webhook_not_configured'
   | 'webhook_signature_invalid'
   | 'webhook_timestamp_invalid'
-  | 'webhook_conflict';
+  | 'webhook_conflict'
+  // M3.1
+  | 'manual_review_not_applicable'
+  | 'contradictory_resolution';
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
@@ -162,6 +165,28 @@ export class WebhookConflictError extends DomainError {
       'webhook_conflict',
       409,
       'this webhook event id was already seen with a different payload',
+    );
+  }
+}
+
+export class ManualReviewNotApplicableError extends DomainError {
+  constructor(status: string) {
+    super(
+      'manual_review_not_applicable',
+      409,
+      `payout in status ${status} cannot be resolved through manual review`,
+      { status },
+    );
+  }
+}
+
+export class ContradictoryResolutionError extends DomainError {
+  constructor(existing: string, attempted: string) {
+    super(
+      'contradictory_resolution',
+      409,
+      `payout already ${existing}; a manual "${attempted}" resolution was rejected`,
+      { existing, attempted },
     );
   }
 }

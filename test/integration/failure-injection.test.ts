@@ -154,7 +154,7 @@ describe('integration: failure injection', () => {
       .execute();
     provider.onStatus('po-fi-rec', { kind: 'succeeded', providerPayoutId: 'mpp-fi' });
 
-    const reconcile = new ReconciliationService(stack.services.payouts, provider);
+    const reconcile = new ReconciliationService(getDb(), stack.services.payouts, provider);
     armFault('reconciliation_transition');
     const r1 = await reconcile.reconcileOnce();
     expect(r1.errors).toBe(1);

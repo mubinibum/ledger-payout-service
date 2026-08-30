@@ -69,6 +69,14 @@ const EnvSchema = z.object({
   RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(1_000).default(50),
   RECONCILE_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(20),
 
+  // Alert threshold: a payout still holding reserved funds this long after creation is
+  // surfaced by the `payouts_reserved_beyond_threshold` gauge / runbook.
+  RESERVED_PAYOUT_ALERT_SEC: z.coerce.number().int().min(1).max(2_592_000).default(3_600),
+
+  // How long the outbox publisher waits for a single `queue.add` before giving up on it
+  // (and retrying the event next cycle). Keeps a hung Redis from holding a DB row lock.
+  OUTBOX_ENQUEUE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3_000),
+
   // Mock provider process (local only).
   MOCK_PROVIDER_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   MOCK_PROVIDER_WEBHOOK_URL: z

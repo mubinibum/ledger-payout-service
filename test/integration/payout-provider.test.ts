@@ -14,7 +14,7 @@ describe('integration: mock provider adapter', () => {
       webhookSecret: 'x'.repeat(20),
       hangMs: 400,
     });
-    client = new MockProviderClient(mock.baseUrl, 150);
+    client = new MockProviderClient({ baseUrl: mock.baseUrl, timeoutMs: 150 });
   });
   afterAll(() => mock.stop());
   beforeEach(() => mock.reset());
@@ -61,17 +61,36 @@ describe('integration: mock provider adapter', () => {
     });
   });
 
-  it('transient 5xx → ProviderError(transient)', async () => {
-    await mock.setScenario('k5', { mode: 'transient_5xx', times: 5 });
+  it('HTTP 5xx → ProviderError(AMBIGUOUS) by default — the provider may have processed it', async () => {
+    await mock.setScenario('k5', { mode: 'server_5xx' });
     await expect(client.createPayout(req('k5'))).rejects.toMatchObject({
+      classification: 'ambiguous',
+    });
+  });
+
+  it('HTTP 5xx → transient only when the adapter declares 5xx non-processing', async () => {
+    const strictClient = new MockProviderClient({
+      baseUrl: mock.baseUrl,
+      timeoutMs: 150,
+      capabilities: { fivexxIsDefinitiveNonProcessing: true },
+    });
+    await mock.setScenario('k5b', { mode: 'server_5xx' });
+    await expect(strictClient.createPayout(req('k5b'))).rejects.toMatchObject({
       classification: 'transient',
     });
   });
 
-  it('rate limit (429) → ProviderError(transient)', async () => {
+  it('rate limit (429) → ProviderError(transient) — rejected before processing', async () => {
     await mock.setScenario('k6', { mode: 'rate_limit', times: 5 });
     await expect(client.createPayout(req('k6'))).rejects.toMatchObject({
       classification: 'transient',
+    });
+  });
+
+  it('an unparseable 2xx response → ProviderError(ambiguous)', async () => {
+    await mock.setScenario('k6b', { mode: 'malformed_response' });
+    await expect(client.createPayout(req('k6b'))).rejects.toMatchObject({
+      classification: 'ambiguous',
     });
   });
 
@@ -95,5 +114,11 @@ describe('integration: mock provider adapter', () => {
 
   it('getPayoutStatus for an unknown key → unknown', async () => {
     expect((await client.getPayoutStatus('never-seen')).kind).toBe('unknown');
+  });
+
+  it('declares conservative capabilities by default', () => {
+    const caps = client.capabilities();
+    expect(caps.notFoundIsDefinitive).toBe(false);
+    expect(caps.fivexxIsDefinitiveNonProcessing).toBe(false);
   });
 });

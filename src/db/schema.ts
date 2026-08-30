@@ -18,8 +18,19 @@ export type EntryDirection = 'debit' | 'credit';
 export type IdempotencyStatus = 'pending' | 'completed' | 'failed';
 
 export type PayoutStatus =
-  'requested' | 'queued' | 'processing' | 'submitted' | 'succeeded' | 'failed' | 'cancelled';
+  | 'requested'
+  | 'queued'
+  | 'processing'
+  | 'submitted'
+  | 'manual_review'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
 export type OutboxStatus = 'pending' | 'published' | 'dead';
+
+/** How a payout reached a definitive (settled/released) outcome. */
+export type DefinitiveOutcomeSource =
+  'webhook' | 'provider_status' | 'provider_rejection' | 'worker' | 'manual';
 
 type MoneyColumn = ColumnType<bigint, bigint | number, bigint | number>;
 type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -87,11 +98,33 @@ export interface PayoutsTable {
   attempt_count: ColumnType<number, number | undefined, number>;
   reconcile_attempt_count: ColumnType<number, number | undefined, number>;
   version: ColumnType<number, number | undefined, number>;
+  /** True once any outcome other than a proven-not-reached transport error has occurred. */
+  provider_contact: ColumnType<boolean, boolean | undefined, boolean>;
+  manual_review_reason: ColumnType<string | null, string | null, string | null>;
+  manual_review_at: NullableTimestamp;
+  last_reconciliation_outcome: ColumnType<string | null, string | null, string | null>;
+  definitive_outcome_source: ColumnType<
+    DefinitiveOutcomeSource | null,
+    DefinitiveOutcomeSource | null,
+    DefinitiveOutcomeSource | null
+  >;
   submitted_at: NullableTimestamp;
   completed_at: NullableTimestamp;
   next_reconcile_at: NullableTimestamp;
   created_at: Generated<Date>;
   updated_at: TimestampColumn;
+}
+
+export interface PayoutResolutionsTable {
+  id: Generated<string>;
+  payout_id: string;
+  previous_status: string;
+  new_status: string;
+  resolution: string; // 'succeeded' | 'failed' | 'resumed' | 'rejected'
+  reason: string;
+  operator_reference: string;
+  resulting_ledger_transaction_id: ColumnType<string | null, string | null, string | null>;
+  created_at: Generated<Date>;
 }
 
 export interface OutboxEventsTable {
@@ -127,6 +160,7 @@ export interface Database {
   ledger_entries: LedgerEntriesTable;
   idempotency_records: IdempotencyRecordsTable;
   payouts: PayoutsTable;
+  payout_resolutions: PayoutResolutionsTable;
   outbox_events: OutboxEventsTable;
   provider_webhook_events: ProviderWebhookEventsTable;
 }

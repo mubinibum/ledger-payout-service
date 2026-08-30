@@ -151,7 +151,7 @@ describe('integration: signed provider webhooks', () => {
     expect((await getPayoutRow(id)).status).toBe('succeeded');
   });
 
-  it('out-of-order: a failure webhook after success is a safe no-op (terminal wins)', async () => {
+  it('out-of-order: a failure webhook after success is a logged no-op (terminal wins)', async () => {
     const { id } = await submittedPayout('po-wh-8');
     await postWebhook(stack.app, {
       eventId: 'evt-wh-8a',
@@ -165,7 +165,7 @@ describe('integration: signed provider webhooks', () => {
       failureCategory: 'permanent_rejection',
     });
     expect(late.statusCode).toBe(200);
-    expect(late.body).toMatchObject({ result: 'noop_terminal' });
+    expect(late.body).toMatchObject({ result: 'conflict_ignored' });
     expect((await getPayoutRow(id)).status).toBe('succeeded');
     expect(await countLedgerByType('payout_release')).toBe(0);
   });
@@ -185,11 +185,11 @@ describe('integration: signed provider webhooks', () => {
     expect(await countLedgerByType('payout_settlement')).toBe(1);
   });
 
-  it('a success webhook after a reconciliation-driven failure is a safe no-op', async () => {
+  it('a success webhook that contradicts an already-released payout is a logged no-op', async () => {
     const { id, source } = await submittedPayout('po-wh-9');
-    // reconciliation-style release first
+    // a definitive provider failure released it first
     await stack.services.payouts.applyProviderFailure(id, {
-      category: 'reconciliation_not_found',
+      category: 'permanent_rejection',
       source: 'reconciliation',
     });
     const res = await postWebhook(stack.app, {
@@ -198,9 +198,10 @@ describe('integration: signed provider webhooks', () => {
       idempotencyKey: 'po-wh-9',
     });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({ result: 'noop' });
+    expect(res.body).toMatchObject({ result: 'conflict_ignored' });
     expect((await getPayoutRow(id)).status).toBe('failed');
     expect(await accountBalance(source)).toBe(100000n);
+    expect(await countLedgerByType('payout_settlement')).toBe(0);
   });
 
   it('returns 503 when no webhook secret is configured', async () => {

@@ -1,6 +1,8 @@
 import {
+  CONSERVATIVE_CAPABILITIES,
   ProviderError,
   type FailureCategory,
+  type ProviderCapabilities,
   type ProviderResult,
 } from '../../src/domain/provider-outcome.js';
 import type {
@@ -27,12 +29,19 @@ export class FakeProvider implements ProviderPort {
   readonly createCalls: string[] = [];
   readonly statusCalls: string[] = [];
   private readonly attempts = new Map<string, number>();
+  private caps: ProviderCapabilities = { ...CONSERVATIVE_CAPABILITIES };
 
   onCreate(idempotencyKey: string, behavior: CreateBehavior): void {
     this.createBehavior.set(idempotencyKey, behavior);
   }
   onStatus(idempotencyKey: string, result: ProviderResult): void {
     this.statusResult.set(idempotencyKey, result);
+  }
+  setCapabilities(caps: Partial<ProviderCapabilities>): void {
+    this.caps = { ...this.caps, ...caps };
+  }
+  capabilities(): ProviderCapabilities {
+    return this.caps;
   }
 
   async createPayout(req: CreatePayoutRequest): Promise<ProviderResult> {

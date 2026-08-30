@@ -13,7 +13,12 @@ import {
 } from '../../domain/errors.js';
 import { requestFingerprint } from '../../domain/fingerprint.js';
 import type { FailureCategory } from '../../domain/provider-outcome.js';
-import { CANCELLABLE_STATUSES, type PayoutStatus } from '../../domain/payout-state.js';
+import type { DefinitiveOutcomeSource } from '../../db/schema.js';
+import {
+  CANCELLABLE_STATUSES,
+  type ManualReviewReason,
+  type PayoutStatus,
+} from '../../domain/payout-state.js';
 import { maybeFault } from '../../infra/fault.js';
 import { metrics } from '../../infra/metrics.js';
 import { runInTransaction } from '../../infra/tx.js';
@@ -36,12 +41,15 @@ import {
   type PayoutView,
 } from './payouts.repository.js';
 import {
+  markManualReviewWithin,
   markProcessingWithin,
   markRetryingWithin,
   markSubmittedWithin,
   releasePayoutWithin,
   rescheduleReconcileWithin,
+  resumeReconcileWithin,
   settlePayoutWithin,
+  type SettleReleaseResult,
   type TransitionSource,
 } from './payout-transitions.js';
 
@@ -177,6 +185,12 @@ export class PayoutsService {
     return listPayouts(this.db, opts);
   }
 
+  /**
+   * Public cancellation. Allowed only when the payout is provably before any provider
+   * submission: status `requested`/`queued` AND no `provider_contact` marker. The payout
+   * row lock serialises this against the worker's `markProcessing`, so exactly one of
+   * "cancelled" / "submitted to provider" wins.
+   */
   async cancelPayout(id: string): Promise<PayoutView> {
     const row = await runInTransaction(this.db, { maxRetries: 3 }, async (trx) => {
       const payout = await trx
@@ -187,14 +201,17 @@ export class PayoutsService {
         .executeTakeFirst();
       if (!payout) throw new PayoutNotFoundError(id);
       if (payout.status === 'cancelled') return payout;
-      if (!CANCELLABLE_STATUSES.has(payout.status)) {
+      if (!CANCELLABLE_STATUSES.has(payout.status) || payout.provider_contact) {
         throw new PayoutNotCancellableError(payout.status);
       }
-      return releasePayoutWithin(trx, id, {
+      const { payout: updated } = await releasePayoutWithin(trx, id, {
         category: 'cancelled_before_submission',
         source: 'api',
         terminalStatus: 'cancelled',
+        definitiveSource: 'manual',
       });
+      metrics.payoutCancelledTotal.inc();
+      return updated;
     });
     return toPayoutView(row);
   }
@@ -223,8 +240,12 @@ export class PayoutsService {
 
   applyProviderSuccess(
     payoutId: string,
-    opts: { providerPayoutId?: string | null; source: TransitionSource },
-  ): Promise<PayoutRow> {
+    opts: {
+      providerPayoutId?: string | null;
+      source: TransitionSource;
+      definitiveSource?: DefinitiveOutcomeSource;
+    },
+  ): Promise<SettleReleaseResult> {
     return runInTransaction(this.db, { maxRetries: 5 }, (trx) =>
       settlePayoutWithin(trx, payoutId, opts),
     );
@@ -232,16 +253,34 @@ export class PayoutsService {
 
   applyProviderFailure(
     payoutId: string,
-    opts: { category: FailureCategory; source: TransitionSource; terminalStatus?: PayoutStatus },
-  ): Promise<PayoutRow> {
+    opts: {
+      category: FailureCategory;
+      source: TransitionSource;
+      terminalStatus?: PayoutStatus;
+      definitiveSource?: DefinitiveOutcomeSource;
+    },
+  ): Promise<SettleReleaseResult> {
     return runInTransaction(this.db, { maxRetries: 5 }, (trx) =>
       releasePayoutWithin(trx, payoutId, opts),
     );
   }
 
-  rescheduleReconcile(payoutId: string): Promise<void> {
+  /** Route a payout to `manual_review` — funds stay reserved, no automatic processing. */
+  markManualReview(payoutId: string, reason: ManualReviewReason): Promise<PayoutRow> {
+    return runInTransaction(this.db, { maxRetries: 5 }, (trx) =>
+      markManualReviewWithin(trx, payoutId, reason),
+    );
+  }
+
+  resumeReconciliation(payoutId: string): Promise<PayoutRow> {
     return runInTransaction(this.db, { maxRetries: 3 }, (trx) =>
-      rescheduleReconcileWithin(trx, payoutId),
+      resumeReconcileWithin(trx, payoutId),
+    );
+  }
+
+  rescheduleReconcile(payoutId: string, lastOutcome?: string): Promise<void> {
+    return runInTransaction(this.db, { maxRetries: 3 }, (trx) =>
+      rescheduleReconcileWithin(trx, payoutId, lastOutcome),
     );
   }
 

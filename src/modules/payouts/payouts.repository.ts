@@ -1,6 +1,6 @@
 import { sql } from 'kysely';
 import type { Selectable } from 'kysely';
-import type { PayoutsTable, PayoutStatus } from '../../db/schema.js';
+import type { DefinitiveOutcomeSource, PayoutsTable, PayoutStatus } from '../../db/schema.js';
 import type { Executor } from '../../infra/tx.js';
 import { encodeCursor, decodeCursor } from '../../http/pagination.js';
 import type { Page } from '../../domain/types.js';
@@ -18,6 +18,12 @@ export interface PayoutView {
   providerPayoutId: string | null;
   failureCategory: string | null;
   attemptCount: number;
+  reconcileAttemptCount: number;
+  providerContact: boolean;
+  manualReviewReason: string | null;
+  manualReviewAt: string | null;
+  lastReconciliationOutcome: string | null;
+  definitiveOutcomeSource: string | null;
   reservationLedgerTransactionId: string;
   settlementLedgerTransactionId: string | null;
   releaseLedgerTransactionId: string | null;
@@ -39,6 +45,12 @@ export function toPayoutView(row: PayoutRow): PayoutView {
     providerPayoutId: row.provider_payout_id,
     failureCategory: row.failure_category,
     attemptCount: row.attempt_count,
+    reconcileAttemptCount: row.reconcile_attempt_count,
+    providerContact: row.provider_contact,
+    manualReviewReason: row.manual_review_reason,
+    manualReviewAt: row.manual_review_at ? new Date(row.manual_review_at).toISOString() : null,
+    lastReconciliationOutcome: row.last_reconciliation_outcome,
+    definitiveOutcomeSource: row.definitive_outcome_source,
     reservationLedgerTransactionId: row.reservation_ledger_transaction_id,
     settlementLedgerTransactionId: row.settlement_ledger_transaction_id,
     releaseLedgerTransactionId: row.release_ledger_transaction_id,
@@ -111,6 +123,12 @@ export interface PayoutPatch {
   nextReconcileAt?: Date | null;
   incrementAttempt?: boolean;
   incrementReconcileAttempt?: boolean;
+  resetReconcileAttempt?: boolean;
+  providerContact?: boolean;
+  manualReviewReason?: string | null;
+  manualReviewAt?: 'now' | null;
+  lastReconciliationOutcome?: string | null;
+  definitiveOutcomeSource?: DefinitiveOutcomeSource | null;
 }
 
 /** Applies a transition patch and always bumps `version` + `updated_at`. */
@@ -142,6 +160,20 @@ export async function updatePayout(
   if (patch.incrementAttempt) set['attempt_count'] = sql`attempt_count + 1`;
   if (patch.incrementReconcileAttempt) {
     set['reconcile_attempt_count'] = sql`reconcile_attempt_count + 1`;
+  }
+  if (patch.resetReconcileAttempt) set['reconcile_attempt_count'] = 0;
+  if (patch.providerContact !== undefined) set['provider_contact'] = patch.providerContact;
+  if (patch.manualReviewReason !== undefined) {
+    set['manual_review_reason'] = patch.manualReviewReason;
+  }
+  if (patch.manualReviewAt !== undefined) {
+    set['manual_review_at'] = patch.manualReviewAt === 'now' ? sql`now()` : null;
+  }
+  if (patch.lastReconciliationOutcome !== undefined) {
+    set['last_reconciliation_outcome'] = patch.lastReconciliationOutcome;
+  }
+  if (patch.definitiveOutcomeSource !== undefined) {
+    set['definitive_outcome_source'] = patch.definitiveOutcomeSource;
   }
 
   return db
@@ -225,4 +257,65 @@ export async function payoutCountsByStatus(db: Executor): Promise<PayoutStateCou
     .groupBy('status')
     .execute();
   return rows.map((r) => ({ status: r.status, count: Number(r.count) }));
+}
+
+export interface PayoutSafetyStats {
+  byStatus: Record<string, number>;
+  manualReview: number;
+  manualReviewOldestSeconds: number | null;
+  reservedBeyondThreshold: number;
+  outboxDeadWithReservedPayout: number;
+}
+
+/** One query pass for the safety gauges (manual-review backlog, stuck reservations, …). */
+export async function payoutSafetyStats(
+  db: Executor,
+  reservedThresholdSeconds: number,
+): Promise<PayoutSafetyStats> {
+  const statusRows = await db
+    .selectFrom('payouts')
+    .select('status')
+    .select((eb) => eb.fn.countAll<string>().as('count'))
+    .groupBy('status')
+    .execute();
+  const byStatus: Record<string, number> = {};
+  for (const r of statusRows) byStatus[r.status] = Number(r.count);
+
+  const mr = await db
+    .selectFrom('payouts')
+    .select((eb) => eb.fn.min('manual_review_at').as('oldest'))
+    .where('status', '=', 'manual_review')
+    .executeTakeFirst();
+
+  // Payouts still holding reserved funds (submitted / manual_review / processing) older
+  // than the alert threshold.
+  const reserved = await db
+    .selectFrom('payouts')
+    .select((eb) => eb.fn.countAll<string>().as('n'))
+    .where('status', 'in', ['submitted', 'manual_review', 'processing', 'queued', 'requested'])
+    .where(
+      'created_at',
+      '<',
+      sql<Date>`now() - (${reservedThresholdSeconds} || ' seconds')::interval`,
+    )
+    .executeTakeFirstOrThrow();
+
+  const deadOutbox = await db
+    .selectFrom('outbox_events as o')
+    .innerJoin('payouts as p', 'p.id', 'o.aggregate_id')
+    .select((eb) => eb.fn.countAll<string>().as('n'))
+    .where('o.status', '=', 'dead')
+    .where('o.aggregate_type', '=', 'payout')
+    .where('p.status', 'in', ['requested', 'queued', 'submitted', 'manual_review', 'processing'])
+    .executeTakeFirstOrThrow();
+
+  return {
+    byStatus,
+    manualReview: byStatus['manual_review'] ?? 0,
+    manualReviewOldestSeconds: mr?.oldest
+      ? Math.round((Date.now() - new Date(mr.oldest).getTime()) / 1000)
+      : null,
+    reservedBeyondThreshold: Number(reserved.n),
+    outboxDeadWithReservedPayout: Number(deadOutbox.n),
+  };
 }

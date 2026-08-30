@@ -39,11 +39,41 @@ export function defaultJobOptions(): JobsOptions {
   };
 }
 
-/** BullMQ-backed `JobEnqueuer`. A deterministic `jobId` makes re-adds idempotent. */
-export function bullEnqueuer(q: Queue = getPayoutQueue()): JobEnqueuer {
+export class EnqueueTimeoutError extends Error {
+  readonly code = 'OUTBOX_ENQUEUE_TIMEOUT';
+  constructor(ms: number) {
+    super(`queue.add did not complete within ${ms}ms`);
+    this.name = 'EnqueueTimeoutError';
+  }
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new EnqueueTimeoutError(ms)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * BullMQ-backed `JobEnqueuer`. A deterministic `jobId` makes re-adds idempotent, and each
+ * `add` is bounded by `OUTBOX_ENQUEUE_TIMEOUT_MS` so a hung Redis cannot keep the outbox
+ * publisher's DB row lock open indefinitely. On timeout the event is left `pending` and
+ * retried next cycle; if the add actually landed, the jobId dedupes the duplicate.
+ */
+export function bullEnqueuer(
+  q: Queue = getPayoutQueue(),
+  timeoutMs: number = loadEnv().OUTBOX_ENQUEUE_TIMEOUT_MS,
+): JobEnqueuer {
   return {
     async add(name, data, opts): Promise<void> {
-      await q.add(name, data, { jobId: opts.jobId });
+      await withTimeout(q.add(name, data, { jobId: opts.jobId }), timeoutMs);
     },
   };
 }

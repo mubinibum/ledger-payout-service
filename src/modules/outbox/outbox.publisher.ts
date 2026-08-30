@@ -1,4 +1,4 @@
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import type { Database } from '../../db/schema.js';
 import { loadEnv } from '../../config/env.js';
 import { isInjectedFault, maybeFault } from '../../infra/fault.js';
@@ -25,11 +25,14 @@ export interface OutboxPublisherOptions {
   backoffMs: number;
   pollIntervalMs: number;
   sideEffect?: OutboxSideEffect;
+  /** Ran (best-effort) after each cycle — used to refresh domain safety gauges. */
+  afterCycle?: () => Promise<void>;
 }
 
 function errorCategory(err: unknown): string {
   const code =
     typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+  if (code === 'OUTBOX_ENQUEUE_TIMEOUT') return 'enqueue_timeout';
   if (code === 'ECONNREFUSED' || code === 'ENOTFOUND') return 'redis_unavailable';
   if (typeof code === 'string') return code;
   return 'enqueue_failed';
@@ -56,6 +59,14 @@ export class OutboxPublisher {
 
   async runOnce(): Promise<{ published: number; retried: number }> {
     return runInTransaction(this.db, { maxRetries: 2 }, async (trx) => {
+      // Safety net: if `queue.add` hangs and leaves the transaction idle past this window,
+      // PostgreSQL aborts the session and releases the row locks (locks are never held
+      // for an unbounded time behind a stuck Redis).
+      const idleTimeoutMs = loadEnv().OUTBOX_ENQUEUE_TIMEOUT_MS + 5_000;
+      await sql`SET LOCAL idle_in_transaction_session_timeout = ${sql.lit(idleTimeoutMs)}`.execute(
+        trx,
+      );
+
       const events = await claimPendingEvents(trx, this.opts.batchSize);
       let published = 0;
       let retried = 0;
@@ -106,10 +117,11 @@ export class OutboxPublisher {
       }
       this.running = true;
       this.inFlight = this.runOnce()
-        .then((r) => {
+        .then(async (r) => {
           if (r.published > 0 || r.retried > 0) {
             logger.debug({ ...r }, 'outbox_cycle');
           }
+          if (this.opts.afterCycle) await this.opts.afterCycle();
         })
         .catch((err: unknown) => logger.error({ err }, 'outbox_cycle_failed'))
         .finally(() => {

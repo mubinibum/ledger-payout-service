@@ -20,8 +20,9 @@ describe('provider transport error classification', () => {
     expect(classifyTransportError({ code: 'ECONNRESET' })).toBe('ambiguous');
   });
 
-  it('defaults unknown errors to transient', () => {
-    expect(classifyTransportError(new Error('weird'))).toBe('transient');
-    expect(classifyTransportError('nope')).toBe('transient');
+  it('defaults unknown / unrecognised errors to AMBIGUOUS (never guess in our favour)', () => {
+    expect(classifyTransportError(new Error('weird'))).toBe('ambiguous');
+    expect(classifyTransportError('nope')).toBe('ambiguous');
+    expect(classifyTransportError({ code: 'ESOMETHING' })).toBe('ambiguous');
   });
 });

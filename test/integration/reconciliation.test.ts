@@ -17,7 +17,7 @@ import { FakeProvider } from '../helpers/fake-provider.js';
 import { processPayoutJob } from '../../src/modules/payouts/payout.worker.js';
 import { ReconciliationService } from '../../src/modules/payouts/reconciliation.service.js';
 
-describe('integration: reconciliation', () => {
+describe('integration: reconciliation (M3.1 policy — ambiguous never releases)', () => {
   let stack: StartedStack;
   let provider: FakeProvider;
   let reconcile: ReconciliationService;
@@ -28,14 +28,23 @@ describe('integration: reconciliation', () => {
     resetEnvCache();
     provider = new FakeProvider();
     stack = await startStack({ provider });
-    reconcile = new ReconciliationService(stack.services.payouts, provider);
+    reconcile = new ReconciliationService(getDb(), stack.services.payouts, provider);
   });
   afterAll(() => stopApp(stack));
   beforeEach(async () => {
+    provider.setCapabilities({ notFoundIsDefinitive: false });
     await resetDb();
   });
 
-  /** A payout that the worker moved to `submitted` (ambiguous), then aged past the threshold. */
+  async function age(id: string): Promise<void> {
+    await testDb()
+      .updateTable('payouts')
+      .set({ updated_at: new Date(Date.now() - 60_000), next_reconcile_at: null })
+      .where('id', '=', id)
+      .execute();
+  }
+
+  /** A payout the worker moved to `submitted` (ambiguous), aged past the threshold. */
   async function stuckSubmitted(
     externalId: string,
     amount = '20000',
@@ -54,40 +63,33 @@ describe('integration: reconciliation', () => {
       { payoutId: id, attemptsMade: 0, maxAttempts: 5 },
     );
     expect((await getPayoutRow(id)).status).toBe('submitted');
-    // age it
-    await testDb()
-      .updateTable('payouts')
-      .set({ updated_at: new Date(Date.now() - 60_000), next_reconcile_at: null })
-      .where('id', '=', id)
-      .execute();
+    await age(id);
     return { id, source };
   }
 
-  it('an ambiguous timeout never releases funds on its own', async () => {
+  it('an ambiguous outcome never releases funds on its own', async () => {
     const { id, source } = await stuckSubmitted('po-rec-0');
-    // immediately after the ambiguous outcome, before reconciliation:
     expect(await accountBalance(source)).toBe(80000n);
     expect(await systemBalance('payout_holding')).toBe(20000n);
     const row = await getPayoutRow(id);
+    expect(row.provider_contact).toBe(true);
     expect(row.release_ledger_transaction_id).toBeNull();
     expect(row.settlement_ledger_transaction_id).toBeNull();
   });
 
-  it('reconciliation settles a payout the provider reports succeeded — once', async () => {
+  it('settles a payout the provider reports succeeded — once', async () => {
     const { id } = await stuckSubmitted('po-rec-1');
     provider.onStatus('po-rec-1', { kind: 'succeeded', providerPayoutId: 'mpp-1' });
 
-    const a = await reconcile.reconcileOnce();
-    expect(a.settled).toBe(1);
-    const b = await reconcile.reconcileOnce(); // idempotent
-    expect(b.settled).toBe(0);
+    expect((await reconcile.reconcileOnce()).settled).toBe(1);
+    expect((await reconcile.reconcileOnce()).settled).toBe(0); // idempotent
 
     expect((await getPayoutRow(id)).status).toBe('succeeded');
     expect(await countLedgerByType('payout_settlement')).toBe(1);
     await assertAllLedgerBalanced();
   });
 
-  it('reconciliation releases a payout the provider reports failed — once', async () => {
+  it('releases a payout the provider reports definitively failed — once', async () => {
     const { id, source } = await stuckSubmitted('po-rec-2');
     provider.onStatus('po-rec-2', {
       kind: 'failed',
@@ -113,33 +115,76 @@ describe('integration: reconciliation', () => {
     const row = await getPayoutRow(id);
     expect(row.status).toBe('submitted');
     expect(row.reconcile_attempt_count).toBe(1);
-    expect(row.next_reconcile_at).not.toBeNull();
     expect(await systemBalance('payout_holding')).toBe(20000n);
     expect(await accountBalance(source)).toBe(80000n);
   });
 
-  it('an unknown provider result eventually releases after RECONCILE_MAX_ATTEMPTS', async () => {
+  it('generic provider not_found → funds stay reserved, then manual_review at max attempts', async () => {
     const { id, source } = await stuckSubmitted('po-rec-4');
     provider.onStatus('po-rec-4', { kind: 'unknown' });
 
     for (let i = 0; i < 4; i += 1) {
       await reconcile.reconcileOnce();
-      await testDb()
-        .updateTable('payouts')
-        .set({ updated_at: new Date(Date.now() - 60_000), next_reconcile_at: null })
-        .where('id', '=', id)
-        .execute();
+      await age(id);
     }
 
     const row = await getPayoutRow(id);
+    expect(row.status).toBe('manual_review');
+    expect(row.manual_review_reason).toBe('reconciliation_exhausted');
+    expect(row.release_ledger_transaction_id).toBeNull();
+    expect(await accountBalance(source)).toBe(80000n); // still reserved
+    expect(await systemBalance('payout_holding')).toBe(20000n);
+  });
+
+  it('persistent pending → manual_review at max attempts, funds reserved', async () => {
+    const { id, source } = await stuckSubmitted('po-rec-4b');
+    provider.onStatus('po-rec-4b', { kind: 'pending', providerPayoutId: 'mpp-4b' });
+
+    for (let i = 0; i < 4; i += 1) {
+      await reconcile.reconcileOnce();
+      await age(id);
+    }
+    const row = await getPayoutRow(id);
+    expect(row.status).toBe('manual_review');
+    expect(await accountBalance(source)).toBe(80000n);
+  });
+
+  it('only releases on not_found when the adapter declares it definitive', async () => {
+    const { id, source } = await stuckSubmitted('po-rec-4c');
+    provider.onStatus('po-rec-4c', { kind: 'unknown' });
+    provider.setCapabilities({ notFoundIsDefinitive: true });
+
+    await reconcile.reconcileOnce();
+
+    const row = await getPayoutRow(id);
     expect(row.status).toBe('failed');
-    expect(row.failure_category).toBe('reconciliation_not_found');
+    expect(row.failure_category).toBe('definitive_not_found');
     expect(await accountBalance(source)).toBe(100000n);
+  });
+
+  it('a malformed provider status → manual_review after the retry budget, never released', async () => {
+    const { id, source } = await stuckSubmitted('po-rec-4d');
+    // FakeProvider throwing from getPayoutStatus simulates an unparseable / broken status.
+    provider.onStatus('po-rec-4d', { kind: 'succeeded', providerPayoutId: 'x' });
+    const original = provider.getPayoutStatus.bind(provider);
+    provider.getPayoutStatus = async (): Promise<never> => {
+      throw new Error('unparseable provider response');
+    };
+
+    for (let i = 0; i < 4; i += 1) {
+      await reconcile.reconcileOnce();
+      await age(id);
+    }
+    provider.getPayoutStatus = original;
+
+    const row = await getPayoutRow(id);
+    expect(row.status).toBe('manual_review');
+    expect(row.manual_review_reason).toBe('malformed_provider_status');
+    expect(await accountBalance(source)).toBe(80000n);
   });
 
   it('worker and reconciliation racing on the same payout do not double-apply', async () => {
     const { id } = await stuckSubmitted('po-rec-5');
-    provider.onCreate('po-rec-5', { kind: 'succeeded' });
     provider.onStatus('po-rec-5', { kind: 'succeeded', providerPayoutId: 'mpp-5' });
 
     await Promise.all([
