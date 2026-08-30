@@ -106,7 +106,7 @@ export class AccountsService {
           throw new CurrencyMismatchError(target.currency.trim(), input.currency);
         }
 
-        const system = await findSystemAccount(trx, input.currency);
+        const system = await findSystemAccount(trx, 'funding', input.currency);
         if (!system) throw new UnsupportedCurrencyError(input.currency);
 
         // Lock both rows in a single deterministic order.

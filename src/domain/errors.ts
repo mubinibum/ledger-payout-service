@@ -16,7 +16,15 @@ export type DomainErrorCode =
   | 'request_in_progress'
   | 'funding_disabled'
   | 'unsupported_currency'
-  | 'not_found';
+  | 'not_found'
+  // M3
+  | 'payout_not_found'
+  | 'invalid_payout_transition'
+  | 'payout_not_cancellable'
+  | 'webhook_not_configured'
+  | 'webhook_signature_invalid'
+  | 'webhook_timestamp_invalid'
+  | 'webhook_conflict';
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
@@ -113,6 +121,48 @@ export class UnsupportedCurrencyError extends DomainError {
 export class NotFoundError extends DomainError {
   constructor(what: string) {
     super('not_found', 404, `${what} not found`);
+  }
+}
+
+export class PayoutNotFoundError extends DomainError {
+  constructor(id: string) {
+    super('payout_not_found', 404, 'payout not found', { id });
+  }
+}
+
+export class PayoutNotCancellableError extends DomainError {
+  constructor(status: string) {
+    super('payout_not_cancellable', 409, `payout in status ${status} can no longer be cancelled`, {
+      status,
+    });
+  }
+}
+
+export class WebhookNotConfiguredError extends DomainError {
+  constructor() {
+    super('webhook_not_configured', 503, 'webhook verification is not configured on this instance');
+  }
+}
+
+export class WebhookSignatureInvalidError extends DomainError {
+  constructor() {
+    super('webhook_signature_invalid', 401, 'webhook signature verification failed');
+  }
+}
+
+export class WebhookTimestampInvalidError extends DomainError {
+  constructor() {
+    super('webhook_timestamp_invalid', 401, 'webhook timestamp is outside the allowed window');
+  }
+}
+
+export class WebhookConflictError extends DomainError {
+  constructor() {
+    super(
+      'webhook_conflict',
+      409,
+      'this webhook event id was already seen with a different payload',
+    );
   }
 }
 

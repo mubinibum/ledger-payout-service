@@ -67,16 +67,23 @@ export async function lockAccounts(db: Executor, ids: readonly string[]): Promis
     .execute();
 }
 
-/** Finds the internal system funding account for a currency (used by the funding flow). */
+export type SystemAccountPurpose = 'funding' | 'payout_holding' | 'provider_clearing';
+
+/**
+ * Finds the internal system account for a given purpose + currency. System accounts are
+ * seeded by migration and keyed by a stable `external_id` of the form
+ * `system:<purpose>:<CURRENCY>`.
+ */
 export async function findSystemAccount(
   db: Executor,
+  purpose: SystemAccountPurpose,
   currency: string,
 ): Promise<AccountRow | undefined> {
   return db
     .selectFrom('accounts')
     .selectAll()
+    .where('external_id', '=', `system:${purpose}:${currency}`)
     .where('type', '=', 'system')
-    .where('currency', '=', currency)
     .executeTakeFirst();
 }
 

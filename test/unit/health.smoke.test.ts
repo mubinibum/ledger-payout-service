@@ -21,7 +21,7 @@ describe('smoke: app skeleton', () => {
   it('builds the app and serves the root descriptor', async () => {
     const res = await app.inject({ method: 'GET', url: '/' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ name: 'ledger-payout-service', milestone: 'M2' });
+    expect(res.json()).toMatchObject({ name: 'ledger-payout-service', milestone: 'M3' });
   });
 
   it('GET /healthz is always 200 (liveness)', async () => {

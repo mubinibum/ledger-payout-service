@@ -2,6 +2,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely';
 import pg from 'pg';
 import type { Database } from '../../src/db/schema.js';
 import { SUPPORTED_CURRENCIES } from '../../src/db/migrations/20260829_0003_system_account.js';
+import { PAYOUT_SYSTEM_PURPOSES } from '../../src/db/migrations/20260830_0005_payout_system_accounts.js';
 
 /**
  * A Kysely handle to the shared test database started by `test/global-setup.ts`. This is
@@ -22,12 +23,15 @@ export function testDb(): Kysely<Database> {
   return db;
 }
 
-/** Truncates every table and re-seeds the system accounts (migration 0003 data). */
+/** Truncates every table and re-seeds the system accounts (migrations 0003 + 0005 data). */
 export async function resetDb(): Promise<void> {
   const d = testDb();
-  await sql`TRUNCATE ledger_entries, ledger_transactions, idempotency_records, accounts RESTART IDENTITY CASCADE`.execute(
-    d,
-  );
+  await sql`
+    TRUNCATE payouts, outbox_events, provider_webhook_events,
+             ledger_entries, ledger_transactions, idempotency_records, accounts
+      RESTART IDENTITY CASCADE
+  `.execute(d);
+
   for (const currency of SUPPORTED_CURRENCIES) {
     await d
       .insertInto('accounts')
@@ -40,6 +44,19 @@ export async function resetDb(): Promise<void> {
         balance_minor: 0n,
       })
       .execute();
+    for (const purpose of PAYOUT_SYSTEM_PURPOSES) {
+      await d
+        .insertInto('accounts')
+        .values({
+          external_id: `system:${purpose}:${currency}`,
+          type: 'system',
+          currency,
+          status: 'active',
+          allow_overdraft: false,
+          balance_minor: 0n,
+        })
+        .execute();
+    }
   }
 }
 

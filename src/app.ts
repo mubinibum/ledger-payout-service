@@ -4,18 +4,21 @@ import { getDb } from './infra/db.js';
 import { loggerOptions } from './infra/logger.js';
 import { registerRequestContext, requestIdFactory } from './plugins/request-context.js';
 import { healthRoutes } from './modules/health/health.routes.js';
-import { AccountsService } from './modules/accounts/accounts.service.js';
 import { accountsRoutes } from './modules/accounts/accounts.routes.js';
-import { TransfersService } from './modules/transfers/transfers.service.js';
 import { transfersRoutes } from './modules/transfers/transfers.routes.js';
+import { payoutRoutes } from './modules/payouts/payouts.routes.js';
+import { webhookRoutes } from './modules/webhooks/webhooks.routes.js';
+import { buildServices, type Services } from './composition.js';
 import { sendError } from './http/errors.js';
 
 /**
  * Builds the Fastify application without starting a listener. Kept separate from
- * `index.ts` so tests can exercise the app in-process (`app.inject`).
+ * `index.ts` so tests can exercise the app in-process (`app.inject`). Tests may pass their
+ * own `Services` (e.g. a provider pointed at an ephemeral mock).
  */
-export async function buildApp(): Promise<FastifyInstance> {
+export async function buildApp(services?: Services): Promise<FastifyInstance> {
   const env = loadEnv();
+  const svc = services ?? buildServices(getDb());
 
   const app = Fastify({
     logger: loggerOptions(),
@@ -26,18 +29,16 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   registerRequestContext(app);
 
-  const db = getDb();
-  const accounts = new AccountsService(db);
-  const transfers = new TransfersService(db);
-
   await app.register(healthRoutes);
-  await app.register(accountsRoutes({ accounts }));
-  await app.register(transfersRoutes({ transfers }));
+  await app.register(accountsRoutes({ accounts: svc.accounts }));
+  await app.register(transfersRoutes({ transfers: svc.transfers }));
+  await app.register(payoutRoutes({ payouts: svc.payouts }));
+  await app.register(webhookRoutes({ webhooks: svc.webhooks }));
 
   app.get('/', () => ({
     name: 'ledger-payout-service',
     status: 'in-development',
-    milestone: 'M2',
+    milestone: 'M3',
     env: env.NODE_ENV,
   }));
 

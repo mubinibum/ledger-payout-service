@@ -11,13 +11,19 @@ import type { ColumnType, Generated } from 'kysely';
 
 export type AccountStatus = 'active' | 'frozen' | 'closed';
 export type AccountType = 'user' | 'system';
-export type LedgerTransactionType = 'funding' | 'transfer';
+export type LedgerTransactionType =
+  'funding' | 'transfer' | 'payout_reservation' | 'payout_settlement' | 'payout_release';
 export type LedgerTransactionStatus = 'committed';
 export type EntryDirection = 'debit' | 'credit';
 export type IdempotencyStatus = 'pending' | 'completed' | 'failed';
 
+export type PayoutStatus =
+  'requested' | 'queued' | 'processing' | 'submitted' | 'succeeded' | 'failed' | 'cancelled';
+export type OutboxStatus = 'pending' | 'published' | 'dead';
+
 type MoneyColumn = ColumnType<bigint, bigint | number, bigint | number>;
 type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
+type NullableTimestamp = ColumnType<Date | null, Date | string | null, Date | string | null>;
 
 export interface AccountsTable {
   id: Generated<string>;
@@ -64,9 +70,63 @@ export interface IdempotencyRecordsTable {
   updated_at: TimestampColumn;
 }
 
+export interface PayoutsTable {
+  id: Generated<string>;
+  external_id: string;
+  source_account_id: string;
+  amount_minor: MoneyColumn;
+  currency: string;
+  status: ColumnType<PayoutStatus, PayoutStatus | undefined, PayoutStatus>;
+  provider: ColumnType<string, string | undefined, string>;
+  provider_idempotency_key: string;
+  provider_payout_id: ColumnType<string | null, string | null, string | null>;
+  reservation_ledger_transaction_id: string;
+  settlement_ledger_transaction_id: ColumnType<string | null, string | null, string | null>;
+  release_ledger_transaction_id: ColumnType<string | null, string | null, string | null>;
+  failure_category: ColumnType<string | null, string | null, string | null>;
+  attempt_count: ColumnType<number, number | undefined, number>;
+  reconcile_attempt_count: ColumnType<number, number | undefined, number>;
+  version: ColumnType<number, number | undefined, number>;
+  submitted_at: NullableTimestamp;
+  completed_at: NullableTimestamp;
+  next_reconcile_at: NullableTimestamp;
+  created_at: Generated<Date>;
+  updated_at: TimestampColumn;
+}
+
+export interface OutboxEventsTable {
+  id: Generated<string>;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  schema_version: ColumnType<number, number | undefined, number>;
+  payload: ColumnType<Record<string, unknown>, string, string>;
+  status: ColumnType<OutboxStatus, OutboxStatus | undefined, OutboxStatus>;
+  attempt_count: ColumnType<number, number | undefined, number>;
+  available_at: TimestampColumn;
+  locked_at: NullableTimestamp;
+  published_at: NullableTimestamp;
+  last_error: ColumnType<string | null, string | null, string | null>;
+  created_at: Generated<Date>;
+}
+
+export interface ProviderWebhookEventsTable {
+  id: Generated<string>;
+  provider_event_id: string;
+  event_type: string;
+  provider_payout_id: ColumnType<string | null, string | null, string | null>;
+  payload_hash: string;
+  result: ColumnType<string | null, string | null, string | null>;
+  received_at: Generated<Date>;
+  processed_at: NullableTimestamp;
+}
+
 export interface Database {
   accounts: AccountsTable;
   ledger_transactions: LedgerTransactionsTable;
   ledger_entries: LedgerEntriesTable;
   idempotency_records: IdempotencyRecordsTable;
+  payouts: PayoutsTable;
+  outbox_events: OutboxEventsTable;
+  provider_webhook_events: ProviderWebhookEventsTable;
 }
