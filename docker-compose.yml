@@ -1,5 +1,8 @@
 # Local development dependencies only. Not a production deployment.
 # Values here are throwaway and match .env.example; the containers bind to localhost.
+# The service, publisher, worker, mock provider and reconcile pass all run as Node
+# processes (`npm run dev` / `dev:publisher` / `dev:worker` / `dev:mock-provider` /
+# `reconcile`) — see the README. This file provides only PostgreSQL and Redis.
 services:
   postgres:
     image: postgres:16-alpine

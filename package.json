@@ -5,7 +5,7 @@
   "description": "A generic, from-scratch double-entry ledger and payout service — an engineering demonstration, not a real financial service.",
   "type": "module",
   "engines": {
-    "node": ">=20.11 <21"
+    "node": ">=20.19 <21"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
