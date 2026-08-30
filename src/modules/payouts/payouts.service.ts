@@ -70,13 +70,15 @@ export class PayoutsService {
 
   async createPayout(input: CreatePayoutInput, idempotencyKey: string): Promise<PayoutResult> {
     const { TRANSFER_MAX_RETRIES, PAYOUT_PROVIDER } = loadEnv();
-    const externalId = input.externalId ?? `po_${randomUUID()}`;
 
+    // The fingerprint covers only what the client actually sent. A client-supplied
+    // externalId is semantic; an auto-generated one is not, so it is created only after
+    // the idempotency gate (a replay returns the first payout regardless).
     const fingerprint = requestFingerprint('payout', {
       source: input.sourceAccountId,
       amount: input.amountMinor.toString(10),
       currency: input.currency,
-      externalId,
+      externalId: input.externalId ?? null,
       reference: input.reference ?? null,
       metadata: input.metadata ?? {},
     });
@@ -84,6 +86,8 @@ export class PayoutsService {
     return runInTransaction(this.db, { maxRetries: TRANSFER_MAX_RETRIES }, async (trx) => {
       const gate = await beginIdempotent(trx, 'payout', idempotencyKey, fingerprint);
       if (gate.kind === 'replay') return { statusCode: gate.statusCode, body: gate.body };
+
+      const externalId = input.externalId ?? `po_${randomUUID()}`;
 
       const clash = await trx
         .selectFrom('payouts')

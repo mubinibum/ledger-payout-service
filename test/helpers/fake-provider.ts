@@ -43,9 +43,12 @@ export class FakeProvider implements ProviderPort {
     this.attempts.set(req.idempotencyKey, n);
 
     switch (behavior.kind) {
-      case 'transient':
+      case 'transient': {
         if (n <= behavior.times) throw new ProviderError('transient', 'temporary provider error');
-        return this.accept(req.idempotencyKey, existing);
+        const id = existing ?? `fpp_${req.idempotencyKey}`;
+        this.stored.set(req.idempotencyKey, id);
+        return { kind: 'succeeded', providerPayoutId: id };
+      }
       case 'permanent':
         throw new ProviderError(
           'permanent',

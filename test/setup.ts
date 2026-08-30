@@ -13,7 +13,18 @@ beforeAll(() => {
   // The funding endpoint is off by default; the test suite opts in explicitly. Individual
   // tests that assert the disabled behaviour flip it back off around themselves.
   process.env['ALLOW_FUNDING'] = 'true';
-  process.env['WEBHOOK_SECRET'] ??= 'test-webhook-secret-0123456789';
+  process.env['WEBHOOK_SECRET'] = 'test-webhook-secret-0123456789';
+  // Clear per-file M3 overrides so each file starts from schema defaults.
+  for (const key of [
+    'PAYOUT_QUEUE_NAME',
+    'WORKER_MAX_ATTEMPTS',
+    'WORKER_BACKOFF_MS',
+    'WORKER_CONCURRENCY',
+    'RECONCILE_STALE_AFTER_SEC',
+    'RECONCILE_MAX_ATTEMPTS',
+  ]) {
+    delete process.env[key];
+  }
   if (!process.env['DATABASE_URL']) {
     // No container: point dependencies at closed ports so probes fail immediately.
     process.env['PGPORT'] = '59999';
