@@ -18,7 +18,13 @@ class RecordingEnqueuer implements JobEnqueuer {
   }
 }
 
-const OPTS = { batchSize: 50, maxAttempts: 3, backoffMs: 10, pollIntervalMs: 50 };
+const OPTS = {
+  batchSize: 50,
+  maxAttempts: 3,
+  backoffMs: 10,
+  pollIntervalMs: 50,
+  enqueueTimeoutMs: 2000,
+};
 
 async function seedEvents(n: number): Promise<string[]> {
   const ids: string[] = [];
@@ -144,4 +150,30 @@ describe('integration: transactional outbox publisher', () => {
     // every event id appears, some possibly twice — deterministic jobId makes that safe
     for (const id of ids) expect(jobIds).toContain(id);
   });
+
+  it('a hung Redis: runOnce returns within the enqueue timeout, the event is retried, and no lock is stuck', async () => {
+    const [id] = await seedEvents(1);
+    // an enqueuer that never resolves
+    const hung: JobEnqueuer = { add: () => new Promise<void>(() => undefined) };
+    const publisher = new OutboxPublisher(getDb(), hung, OPTS);
+
+    const started = Date.now();
+    const result = await publisher.runOnce(); // OUTBOX_ENQUEUE_TIMEOUT_MS default 3s
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(10_000);
+    expect(result).toEqual({ published: 0, retried: 1 });
+
+    const row = await testDb()
+      .selectFrom('outbox_events')
+      .selectAll()
+      .where('id', '=', id!)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe('pending');
+    expect(row.last_error).toBe('enqueue_timeout');
+
+    // the row lock is released — a normal cycle recovers immediately
+    const enq = new RecordingEnqueuer();
+    const recovered = await new OutboxPublisher(getDb(), enq, OPTS).runOnce();
+    expect(recovered.published).toBe(1);
+  }, 20_000);
 });

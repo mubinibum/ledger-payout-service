@@ -78,7 +78,32 @@ export class ManualReviewService {
     return this.resolve(payoutId, input, 'failed');
   }
 
-  private resolve(
+  private async resolve(
+    payoutId: string,
+    input: ResolveInput,
+    direction: 'succeeded' | 'failed',
+  ): Promise<ResolutionResult> {
+    try {
+      return await this.resolveInTx(payoutId, input, direction);
+    } catch (err) {
+      if (err instanceof ContradictoryResolutionError) {
+        // Record the rejected attempt in its OWN transaction — the resolve transaction
+        // rolled back, so the audit row would otherwise be lost.
+        await insertResolution(this.db, {
+          payoutId,
+          previousStatus: err.details?.['existing'] as string,
+          newStatus: err.details?.['existing'] as string,
+          resolution: 'rejected',
+          reason: input.reason,
+          operatorReference: input.operatorReference,
+        }).catch(() => undefined);
+        metrics.payoutManualResolutionsTotal.inc({ resolution: direction, outcome: 'rejected' });
+      }
+      throw err;
+    }
+  }
+
+  private resolveInTx(
     payoutId: string,
     input: ResolveInput,
     direction: 'succeeded' | 'failed',
@@ -99,15 +124,6 @@ export class ManualReviewService {
         (direction === 'succeeded' && payout.release_ledger_transaction_id) ||
         (direction === 'failed' && payout.settlement_ledger_transaction_id);
       if (oppositeEffect) {
-        await insertResolution(trx, {
-          payoutId,
-          previousStatus: payout.status,
-          newStatus: payout.status,
-          resolution: 'rejected',
-          reason: input.reason,
-          operatorReference: input.operatorReference,
-        });
-        metrics.payoutManualResolutionsTotal.inc({ resolution: direction, outcome: 'rejected' });
         throw new ContradictoryResolutionError(payout.status, direction);
       }
 

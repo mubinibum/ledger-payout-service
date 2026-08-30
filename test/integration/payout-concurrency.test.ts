@@ -117,4 +117,60 @@ describe('integration: payout concurrency invariants', () => {
     },
     TIMEOUT_MS,
   );
+
+  it(
+    'many payouts with an ambiguous outcome go to manual_review in parallel, no funds lost',
+    async () => {
+      const N = 60;
+      const AMOUNT = 500n;
+      const valueBefore = await totalSystemValue();
+
+      const ids: string[] = [];
+      for (let i = 0; i < N; i += 1) {
+        const src = (await createAccount(stack.app, { currency: 'USD' })).id;
+        await fundAccount(stack.app, src, String(AMOUNT), { currency: 'USD' });
+        const ext = `pc-amb-${i}`;
+        const created = await createPayoutHttp(stack.app, {
+          sourceAccountId: src,
+          amount: String(AMOUNT),
+          externalId: ext,
+        });
+        const id = expectPayout(created.body).id;
+        provider.onCreate(ext, { kind: 'ambiguous' });
+        ids.push(id);
+      }
+
+      // worker + a direct manual_review escalation racing for every payout
+      await Promise.all(
+        ids.flatMap((id) => [
+          processPayoutJob(
+            { db: getDb(), service: stack.services.payouts, provider },
+            { payoutId: id, attemptsMade: 0, maxAttempts: 5 },
+          ),
+          stack.services.payouts
+            .markManualReview(id, 'ambiguous_unresolved')
+            .catch(() => undefined),
+        ]),
+      );
+
+      const rows = await testDb().selectFrom('payouts').select(['status']).execute();
+      for (const r of rows) expect(['submitted', 'manual_review']).toContain(r.status);
+
+      // every unit of value is still accounted for: nothing settled, nothing released
+      expect(await countLedgerByType('payout_settlement')).toBe(0);
+      expect(await countLedgerByType('payout_release')).toBe(0);
+      expect(await systemBalance('payout_holding')).toBe(AMOUNT * BigInt(N));
+      expect(await totalSystemValue()).toBe(valueBefore);
+      await assertAllLedgerBalanced();
+
+      const nonNeg = await testDb()
+        .selectFrom('accounts')
+        .select('balance_minor')
+        .where('balance_minor', '<', 0n)
+        .where('allow_overdraft', '=', false)
+        .execute();
+      expect(nonNeg).toHaveLength(0);
+    },
+    TIMEOUT_MS,
+  );
 });

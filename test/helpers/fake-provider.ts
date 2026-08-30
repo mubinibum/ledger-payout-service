@@ -103,4 +103,15 @@ export class FakeProvider implements ProviderPort {
   createCallCount(idempotencyKey: string): number {
     return this.createCalls.filter((k) => k === idempotencyKey).length;
   }
+
+  /** Clear all state between tests when the same instance is reused. */
+  reset(): void {
+    this.createBehavior.clear();
+    this.statusResult.clear();
+    this.stored.clear();
+    this.attempts.clear();
+    this.createCalls.length = 0;
+    this.statusCalls.length = 0;
+    this.caps = { ...CONSERVATIVE_CAPABILITIES };
+  }
 }

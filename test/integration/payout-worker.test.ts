@@ -14,7 +14,13 @@ import { resetDb, testDb, closeTestDb } from '../helpers/pg.js';
 import { drainQueue } from '../helpers/payouts.js';
 import { FakeProvider } from '../helpers/fake-provider.js';
 
-const PUB_OPTS = { batchSize: 50, maxAttempts: 5, backoffMs: 5, pollIntervalMs: 50 };
+const PUB_OPTS = {
+  batchSize: 50,
+  maxAttempts: 5,
+  backoffMs: 5,
+  pollIntervalMs: 50,
+  enqueueTimeoutMs: 3000,
+};
 
 async function seedPayout(
   db: ReturnType<typeof getDb>,

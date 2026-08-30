@@ -24,9 +24,25 @@ export interface OutboxPublisherOptions {
   maxAttempts: number;
   backoffMs: number;
   pollIntervalMs: number;
+  /** Hard cap on a single `enqueuer.add` — a hung Redis must not hold the DB row lock. */
+  enqueueTimeoutMs: number;
   sideEffect?: OutboxSideEffect;
   /** Ran (best-effort) after each cycle — used to refresh domain safety gauges. */
   afterCycle?: () => Promise<void>;
+}
+
+class EnqueueTimeout extends Error {
+  readonly code = 'OUTBOX_ENQUEUE_TIMEOUT';
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.finally(() => timer && clearTimeout(timer)),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new EnqueueTimeout(`enqueue exceeded ${ms}ms`)), ms);
+    }),
+  ]);
 }
 
 function errorCategory(err: unknown): string {
@@ -59,10 +75,10 @@ export class OutboxPublisher {
 
   async runOnce(): Promise<{ published: number; retried: number }> {
     return runInTransaction(this.db, { maxRetries: 2 }, async (trx) => {
-      // Safety net: if `queue.add` hangs and leaves the transaction idle past this window,
-      // PostgreSQL aborts the session and releases the row locks (locks are never held
-      // for an unbounded time behind a stuck Redis).
-      const idleTimeoutMs = loadEnv().OUTBOX_ENQUEUE_TIMEOUT_MS + 5_000;
+      // Safety net: if `enqueuer.add` hangs and leaves the transaction idle past this
+      // window, PostgreSQL aborts the session and releases the row locks — a stuck Redis
+      // never holds an outbox lock for an unbounded time.
+      const idleTimeoutMs = this.opts.enqueueTimeoutMs + 5_000;
       await sql`SET LOCAL idle_in_transaction_session_timeout = ${sql.lit(idleTimeoutMs)}`.execute(
         trx,
       );
@@ -73,10 +89,13 @@ export class OutboxPublisher {
 
       for (const event of events) {
         try {
-          await this.enqueuer.add(
-            PAYOUT_JOB_NAME,
-            { outboxEventId: event.id, eventType: event.event_type, ...event.payload },
-            { jobId: event.id },
+          await withTimeout(
+            this.enqueuer.add(
+              PAYOUT_JOB_NAME,
+              { outboxEventId: event.id, eventType: event.event_type, ...event.payload },
+              { jobId: event.id },
+            ),
+            this.opts.enqueueTimeoutMs,
           );
           maybeFault('after_enqueue_before_outbox_update');
           await markEventPublished(trx, event.id);
@@ -146,5 +165,6 @@ export function outboxPublisherOptionsFromEnv(): OutboxPublisherOptions {
     maxAttempts: env.OUTBOX_MAX_ATTEMPTS,
     backoffMs: env.WORKER_BACKOFF_MS,
     pollIntervalMs: env.OUTBOX_POLL_INTERVAL_MS,
+    enqueueTimeoutMs: env.OUTBOX_ENQUEUE_TIMEOUT_MS,
   };
 }
