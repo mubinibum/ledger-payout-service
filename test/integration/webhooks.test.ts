@@ -170,6 +170,21 @@ describe('integration: signed provider webhooks', () => {
     expect(await countLedgerByType('payout_release')).toBe(0);
   });
 
+  it('worker and webhook settling the same payout concurrently → one settlement', async () => {
+    const { id } = await submittedPayout('po-wh-race');
+    const results = await Promise.all([
+      stack.services.payouts.applyProviderSuccess(id, { source: 'worker' }),
+      postWebhook(stack.app, {
+        eventId: 'evt-wh-race',
+        type: 'payout.succeeded',
+        idempotencyKey: 'po-wh-race',
+      }),
+    ]);
+    expect((results[1] as { statusCode: number }).statusCode).toBe(200);
+    expect((await getPayoutRow(id)).status).toBe('succeeded');
+    expect(await countLedgerByType('payout_settlement')).toBe(1);
+  });
+
   it('a success webhook after a reconciliation-driven failure is a safe no-op', async () => {
     const { id, source } = await submittedPayout('po-wh-9');
     // reconciliation-style release first
