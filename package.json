@@ -3,7 +3,32 @@
   "version": "0.4.0",
   "private": true,
   "description": "A generic, from-scratch double-entry ledger and payout service — an engineering demonstration, not a real financial service.",
+  "keywords": [
+    "double-entry",
+    "ledger",
+    "payments",
+    "payout",
+    "idempotency",
+    "transactional-outbox",
+    "webhooks",
+    "reconciliation",
+    "fastify",
+    "postgresql",
+    "typescript",
+    "portfolio"
+  ],
+  "license": "MIT",
+  "author": "Fathanmubina",
   "type": "module",
+  "//": "repository / homepage / bugs URLs are PLACEHOLDERS until the public remote is created — see docs/PUBLIC_RELEASE_CHECKLIST.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER-PLACEHOLDER/ledger-payout-service.git"
+  },
+  "homepage": "https://github.com/OWNER-PLACEHOLDER/ledger-payout-service#readme",
+  "bugs": {
+    "url": "https://github.com/OWNER-PLACEHOLDER/ledger-payout-service/issues"
+  },
   "engines": {
     "node": ">=20.19 <21"
   },
@@ -40,7 +65,14 @@
     "audit:prod": "npm audit --omit=dev",
     "audit:dev": "npm audit",
     "scan:proprietary": "node scripts/scan-proprietary.mjs",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run compose:config && npm run scan:proprietary"
+    "openapi:generate": "node scripts/openapi.mjs generate",
+    "openapi:check": "tsx scripts/openapi.mjs check",
+    "sbom": "node scripts/generate-sbom.mjs",
+    "docs:links": "node scripts/check-doc-links.mjs",
+    "licenses:check": "node scripts/check-licenses.mjs",
+    "workflow:check": "node scripts/check-workflow.mjs",
+    "bench": "tsx scripts/bench.mjs",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run openapi:check && npm run docs:links && npm run workflow:check && npm run licenses:check && npm run test && npm run build && npm run compose:config && npm run scan:proprietary"
   },
   "dependencies": {
     "bullmq": "^5.25.6",
@@ -65,6 +97,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.15.0",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.7",
+    "yaml": "^2.9.0"
   }
 }

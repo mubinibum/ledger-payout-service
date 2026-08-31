@@ -1,9 +1,51 @@
+# Everything the build context does NOT need. The build stage copies only package*.json,
+# tsconfig*.json and src/; keeping the context small also keeps secrets and local cruft
+# out of image layers and out of `docker build` logs.
+
+# dependencies & build output (reinstalled / recompiled in the image)
 node_modules
 dist
-coverage
+*.tsbuildinfo
+
+# version control & CI
 .git
+.github
+.gitignore
+.gitattributes
+
+# env & secrets — never into an image
 .env
 .env.*
 !.env.example
-*.log
+scripts/proprietary-terms.local.txt
+
+# tests, fixtures, coverage
+test
+coverage
+vitest.config.ts
+vitest.unit.config.ts
+
+# local tooling & editor
+.vscode
+.idea
+*.swp
 .DS_Store
+.prettierrc.json
+.prettierignore
+eslint.config.js
+
+# docs & non-runtime assets (openapi/ is copied explicitly in the Dockerfile)
+docs
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+LICENSE
+*.md
+
+# local-only generated artefacts
+sbom.json
+bench-results
+docker-compose.yml
+Dockerfile
+.dockerignore

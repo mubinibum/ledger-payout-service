@@ -2,3 +2,12 @@ dist
 node_modules
 coverage
 *.md
+
+# generated / drift-checked by scripts/openapi.mjs — Prettier must not reformat it
+openapi/openapi.json
+# hand-authored with an intentional layout; validated by npm run openapi:check
+openapi/openapi.yaml
+
+# local-only generated artefacts
+sbom.json
+bench-results

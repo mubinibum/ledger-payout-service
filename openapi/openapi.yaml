@@ -1,0 +1,708 @@
+openapi: 3.1.0
+info:
+  title: ledger-payout-service
+  version: 0.4.0
+  summary: Double-entry ledger and payout API (engineering demonstration).
+  description: >
+    HTTP surface of the ledger-payout-service. This is a **portfolio / engineering
+    demonstration** — it handles no real money and integrates with no real payment
+    provider. There is **no end-user authentication** in this milestone: every endpoint is
+    unauthenticated and the service is expected to run on a trusted network only.
+
+
+    Money is represented as **integer minor units** encoded as a decimal string (e.g.
+    `"10000"` = 100.00 of a 2-decimal currency) to avoid floating-point error.
+
+
+    Mutating endpoints require an `Idempotency-Key` request header; replaying the same key
+    with the same payload returns the original result, and replaying it with a different
+    payload is a `409 idempotency_conflict`.
+
+
+    This document is the hand-maintained source of truth. `npm run openapi:check` fails the
+    build if the documented path/method set drifts from the routes the app actually
+    registers (see `test/integration/openapi.test.ts`). The manual-review resolution flow
+    is intentionally **not** an HTTP endpoint — it is an operator CLI (`npm run
+    payout-admin`).
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  contact:
+    name: Project maintainer
+    url: https://example.com/ledger-payout-service
+
+servers:
+  - url: http://127.0.0.1:3000
+    description: Local development
+
+tags:
+  - name: operational
+    description: Liveness, readiness, service info, metrics.
+  - name: accounts
+    description: Accounts and ledger history.
+  - name: transfers
+    description: Internal double-entry transfers.
+  - name: payouts
+    description: Outbound payouts to a (mock) provider.
+  - name: webhooks
+    description: Inbound signed provider callbacks.
+
+paths:
+  /:
+    get:
+      tags: [operational]
+      operationId: getServiceInfo
+      summary: Service info
+      responses:
+        '200':
+          description: Static service metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  description: { type: string }
+                  docs: { type: string }
+                  env: { type: string }
+
+  /healthz:
+    get:
+      tags: [operational]
+      operationId: getLiveness
+      summary: Liveness probe
+      description: 200 whenever the process is up. No dependency checks.
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, uptimeSeconds]
+                properties:
+                  status: { type: string, const: ok }
+                  uptimeSeconds: { type: integer }
+
+  /readyz:
+    get:
+      tags: [operational]
+      operationId: getReadiness
+      summary: Readiness probe
+      description: 200 when every dependency is reachable, 503 otherwise.
+      responses:
+        '200':
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadinessReport' }
+        '503':
+          description: One or more dependencies unavailable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadinessReport' }
+
+  /metrics:
+    get:
+      tags: [operational]
+      operationId: getMetrics
+      summary: Prometheus metrics (opt-in)
+      description: >
+        Prometheus text exposition. **This route only exists when `METRICS_ENABLED=true`.**
+        When the flag is false (the default) the route is not registered and any request
+        returns `404 not_found`. The exposition contains no PII and no identifiers — every
+        label is a bounded enum, an HTTP method, a status class, or a normalised route
+        template.
+      responses:
+        '200':
+          description: Metrics in Prometheus text format (0.0.4).
+          content:
+            text/plain:
+              schema: { type: string }
+        '404':
+          description: Metrics are disabled on this instance.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/accounts:
+    post:
+      tags: [accounts]
+      operationId: createAccount
+      summary: Create an account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAccountBody' }
+      responses:
+        '201':
+          description: Account created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [account]
+                properties:
+                  account: { $ref: '#/components/schemas/Account' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /v1/accounts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [accounts]
+      operationId: getAccount
+      summary: Get an account with its projected balance
+      responses:
+        '200':
+          description: Account detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [account]
+                properties:
+                  account: { $ref: '#/components/schemas/Account' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/accounts/{id}/ledger-entries:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+    get:
+      tags: [accounts]
+      operationId: listLedgerEntries
+      summary: List an account's ledger entries (keyset pagination, newest first)
+      responses:
+        '200':
+          description: A page of ledger entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, nextCursor]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: '#/components/schemas/LedgerEntry' }
+                  nextCursor:
+                    type: [string, 'null']
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/accounts/{id}/funding:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      tags: [accounts]
+      operationId: fundAccount
+      summary: Give an account an opening balance (DEVELOPMENT / DEMO ONLY)
+      description: >
+        **Disabled by default.** Returns `403 funding_disabled` unless `ALLOW_FUNDING=true`,
+        which must never be set in a real deployment — a real ledger has no endpoint that
+        creates money. Provided so a local demo can seed balances via a balanced ledger
+        transaction (credit target / debit the internal system account).
+      x-dev-only: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FundAccountBody' }
+      responses:
+        '201':
+          description: Funding applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ledgerTransaction]
+                properties:
+                  ledgerTransaction: { $ref: '#/components/schemas/LedgerTransaction' }
+        '200':
+          description: Idempotent replay of a previous funding.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ledgerTransaction: { $ref: '#/components/schemas/LedgerTransaction' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403':
+          description: Funding is disabled on this instance.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+
+  /v1/transfers:
+    post:
+      tags: [transfers]
+      operationId: createTransfer
+      summary: Create an internal transfer
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTransferBody' }
+      responses:
+        '201':
+          description: Transfer committed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transfer]
+                properties:
+                  transfer: { $ref: '#/components/schemas/LedgerTransaction' }
+        '200':
+          description: Idempotent replay.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transfer: { $ref: '#/components/schemas/LedgerTransaction' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '422':
+          description: Business rule violation (insufficient funds, currency mismatch, …).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/transfers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [transfers]
+      operationId: getTransfer
+      summary: Get a transfer (ledger transaction) with its entries
+      responses:
+        '200':
+          description: Transfer detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transfer]
+                properties:
+                  transfer: { $ref: '#/components/schemas/LedgerTransaction' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/ledger-transactions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [transfers]
+      operationId: getLedgerTransaction
+      summary: Get any ledger transaction with its entries
+      responses:
+        '200':
+          description: Ledger transaction detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ledgerTransaction]
+                properties:
+                  ledgerTransaction: { $ref: '#/components/schemas/LedgerTransaction' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/payouts:
+    post:
+      tags: [payouts]
+      operationId: createPayout
+      summary: Create a payout (reserves funds)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePayoutBody' }
+      responses:
+        '201':
+          description: Payout created; funds reserved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payout]
+                properties:
+                  payout: { $ref: '#/components/schemas/Payout' }
+        '200':
+          description: Idempotent replay.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payout: { $ref: '#/components/schemas/Payout' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '422':
+          description: Business rule violation (insufficient funds, currency mismatch, …).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [payouts]
+      operationId: listPayouts
+      summary: List payouts (keyset pagination, newest first)
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/PayoutStatus' }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of payouts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payouts, nextCursor]
+                properties:
+                  payouts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Payout' }
+                  nextCursor:
+                    type: [string, 'null']
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /v1/payouts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [payouts]
+      operationId: getPayout
+      summary: Get a payout
+      responses:
+        '200':
+          description: Payout detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payout]
+                properties:
+                  payout: { $ref: '#/components/schemas/Payout' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/payouts/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      tags: [payouts]
+      operationId: cancelPayout
+      summary: Cancel a payout (only before it reached the provider)
+      description: >
+        Succeeds only while the payout is in `requested` or `queued`. Once a worker has
+        begun submission the payout can no longer be cancelled via the API, and a payout in
+        `manual_review` is never API-cancellable — it is resolved by an operator.
+      responses:
+        '200':
+          description: Payout cancelled; reserved funds released.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payout]
+                properties:
+                  payout: { $ref: '#/components/schemas/Payout' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Payout can no longer be cancelled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/webhooks/provider/payouts:
+    post:
+      tags: [webhooks]
+      operationId: receiveProviderWebhook
+      summary: Inbound signed provider payout callback
+      description: >
+        Verified with HMAC-SHA256 over `"{timestamp}.{rawBody}"` using `WEBHOOK_SECRET`.
+        Returns `503 webhook_not_configured` if no secret is set. Replays of a
+        previously-seen `x-provider-event-id` return the original result with `replay:
+        true`; a different payload under the same event id is a `409`.
+      parameters:
+        - name: x-provider-signature
+          in: header
+          required: true
+          schema: { type: string }
+        - name: x-provider-timestamp
+          in: header
+          required: true
+          schema: { type: string }
+        - name: x-provider-event-id
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderWebhookBody' }
+      responses:
+        '200':
+          description: Webhook accepted (or replayed).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [received, result, replay]
+                properties:
+                  received: { type: boolean, const: true }
+                  result: { type: string }
+                  replay: { type: boolean }
+        '401':
+          description: Signature or timestamp verification failed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Same event id, different payload.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Webhook verification is not configured on this instance.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  parameters:
+    AccountId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated unique key (max 200 chars) making the write safe to retry.
+      schema: { type: string, maxLength: 200 }
+
+  responses:
+    ValidationError:
+      description: Request failed validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    IdempotencyConflict:
+      description: Idempotency-Key reused with a different payload.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Money:
+      type: string
+      pattern: '^\d+$'
+      description: Non-negative integer amount in currency minor units, as a decimal string.
+      examples: ['10000']
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      examples: ['USD']
+
+    Error:
+      type: object
+      required: [error, requestId]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+        requestId: { type: string }
+
+    ReadinessReport:
+      type: object
+      required: [status, checkedAt, components]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        checkedAt: { type: string, format: date-time }
+        components:
+          type: object
+          required: [postgres, redis]
+          properties:
+            postgres: { type: string, enum: [ok, unavailable] }
+            redis: { type: string, enum: [ok, unavailable] }
+
+    CreateAccountBody:
+      type: object
+      additionalProperties: false
+      required: [externalId, currency]
+      properties:
+        externalId: { type: string, minLength: 1, maxLength: 200 }
+        currency: { $ref: '#/components/schemas/Currency' }
+        allowOverdraft: { type: boolean, default: false }
+
+    FundAccountBody:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        reference: { type: string, minLength: 1, maxLength: 200 }
+
+    CreateTransferBody:
+      type: object
+      additionalProperties: false
+      required: [sourceAccountId, destinationAccountId, amount, currency]
+      properties:
+        sourceAccountId: { type: string, format: uuid }
+        destinationAccountId: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        reference: { type: string, minLength: 1, maxLength: 200 }
+        metadata: { type: object, additionalProperties: true }
+
+    CreatePayoutBody:
+      type: object
+      additionalProperties: false
+      required: [sourceAccountId, amount, currency]
+      properties:
+        sourceAccountId: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        externalId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: '^[A-Za-z0-9_.:-]+$'
+        reference: { type: string, minLength: 1, maxLength: 200 }
+        metadata: { type: object, additionalProperties: true }
+
+    ProviderWebhookBody:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, idempotencyKey]
+      properties:
+        eventId: { type: string, minLength: 1, maxLength: 200 }
+        type: { type: string, enum: [payout.succeeded, payout.failed] }
+        providerPayoutId: { type: [string, 'null'], maxLength: 200 }
+        idempotencyKey: { type: string, minLength: 1, maxLength: 200 }
+        failureCategory: { type: string, minLength: 1, maxLength: 100 }
+
+    Account:
+      type: object
+      required:
+        [id, externalId, type, currency, status, allowOverdraft, balanceMinor, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        externalId: { type: string }
+        type: { type: string, enum: [user, system] }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status: { type: string, enum: [active, frozen, closed] }
+        allowOverdraft: { type: boolean }
+        balanceMinor: { $ref: '#/components/schemas/Money' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    LedgerEntry:
+      type: object
+      required:
+        [id, ledgerTransactionId, accountId, direction, amountMinor, balanceAfterMinor, currency, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        ledgerTransactionId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        direction: { type: string, enum: [debit, credit] }
+        amountMinor: { $ref: '#/components/schemas/Money' }
+        balanceAfterMinor: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        createdAt: { type: string, format: date-time }
+
+    LedgerTransaction:
+      type: object
+      required: [id, type, status, reference, metadata, createdAt, entries]
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [funding, transfer, payout_reservation, payout_settlement, payout_release]
+        status: { type: string, const: committed }
+        reference: { type: [string, 'null'] }
+        metadata: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/LedgerEntry' }
+
+    PayoutStatus:
+      type: string
+      enum:
+        [requested, queued, processing, submitted, manual_review, succeeded, failed, cancelled]
+
+    Payout:
+      type: object
+      required:
+        [id, externalId, sourceAccountId, amountMinor, currency, status, provider,
+         providerPayoutId, failureCategory, attemptCount, reconcileAttemptCount,
+         providerContact, manualReviewReason, manualReviewAt, lastReconciliationOutcome,
+         definitiveOutcomeSource, reservationLedgerTransactionId,
+         settlementLedgerTransactionId, releaseLedgerTransactionId, submittedAt,
+         completedAt, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        externalId: { type: string }
+        sourceAccountId: { type: string, format: uuid }
+        amountMinor: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status: { $ref: '#/components/schemas/PayoutStatus' }
+        provider: { type: string }
+        providerPayoutId: { type: [string, 'null'] }
+        failureCategory: { type: [string, 'null'] }
+        attemptCount: { type: integer }
+        reconcileAttemptCount: { type: integer }
+        providerContact: { type: boolean }
+        manualReviewReason: { type: [string, 'null'] }
+        manualReviewAt: { type: [string, 'null'], format: date-time }
+        lastReconciliationOutcome: { type: [string, 'null'] }
+        definitiveOutcomeSource: { type: [string, 'null'] }
+        reservationLedgerTransactionId: { type: string, format: uuid }
+        settlementLedgerTransactionId: { type: [string, 'null'], format: uuid }
+        releaseLedgerTransactionId: { type: [string, 'null'], format: uuid }
+        submittedAt: { type: [string, 'null'], format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
