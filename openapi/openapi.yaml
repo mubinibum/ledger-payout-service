@@ -29,7 +29,7 @@ info:
     url: https://opensource.org/licenses/MIT
   contact:
     name: Project maintainer
-    url: https://example.com/ledger-payout-service
+    url: https://github.com/mubinibum/ledger-payout-service
 
 servers:
   - url: http://127.0.0.1:3000

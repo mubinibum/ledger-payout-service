@@ -20,14 +20,14 @@
   "license": "MIT",
   "author": "Fathanmubina",
   "type": "module",
-  "//": "repository / homepage / bugs URLs are PLACEHOLDERS until the public remote is created — see docs/PUBLIC_RELEASE_CHECKLIST.md",
+  "//": "repository / homepage / bugs point at the intended public target (github.com/mubinibum/ledger-payout-service); the remote itself does not exist yet — see docs/PUBLIC_RELEASE_CHECKLIST.md",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER-PLACEHOLDER/ledger-payout-service.git"
+    "url": "git+https://github.com/mubinibum/ledger-payout-service.git"
   },
-  "homepage": "https://github.com/OWNER-PLACEHOLDER/ledger-payout-service#readme",
+  "homepage": "https://github.com/mubinibum/ledger-payout-service#readme",
   "bugs": {
-    "url": "https://github.com/OWNER-PLACEHOLDER/ledger-payout-service/issues"
+    "url": "https://github.com/mubinibum/ledger-payout-service/issues"
   },
   "engines": {
     "node": ">=20.19 <21"

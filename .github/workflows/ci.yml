@@ -5,11 +5,11 @@
 # SUPPLY-CHAIN NOTES
 #   - Least privilege: read-only by default (`permissions: contents: read`); only the
 #     CodeQL job widens its own permissions, and only to write security events.
-#   - Action pinning: first-party `actions/*` use a major tag. Third-party actions
-#     (gitleaks, aquasecurity/trivy-action, github/codeql-action) MUST be re-pinned to a
-#     full 40-char commit SHA before CI is made public — tracked as a blocker in
-#     docs/PUBLIC_RELEASE_CHECKLIST.md. `scripts/check-workflow.mjs` enforces the invariants
-#     that need no network.
+#   - Action pinning (M4.1): every `uses:` — first-party and third-party — is pinned to a
+#     full 40-character immutable commit SHA, resolved read-only from each action's
+#     upstream repository via `gh api repos/<owner>/<repo>/commits/<tag>`. The human-readable
+#     version is kept as a trailing comment. Re-resolve and re-pin when bumping a version.
+#     `scripts/check-workflow.mjs` statically enforces that every `uses:` is SHA-pinned.
 #   - No secrets are referenced, so fork pull requests run the full pipeline safely. Nothing
 #     is uploaded except a non-sensitive SBOM and CodeQL SARIF.
 #   - Hard gates (production `npm audit`, gitleaks, proprietary scan, Trivy fs/config/image,
@@ -30,11 +30,11 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # TODO(pre-public): pin to full commit SHA
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0 # full history for gitleaks
 
-      - uses: actions/setup-node@v4 # TODO(pre-public): pin to full commit SHA
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20.20.2'
           cache: 'npm'
@@ -100,7 +100,7 @@ jobs:
         run: npm run sbom
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4 # TODO(pre-public): pin to full commit SHA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom
           path: sbom.json
@@ -109,11 +109,11 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # TODO(pre-public): pin to full commit SHA
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: gitleaks — full history (HARD GATE)
-        uses: gitleaks/gitleaks-action@v2 # TODO(pre-public): pin to full commit SHA
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
           GITLEAKS_ENABLE_SUMMARY: 'false'
@@ -121,9 +121,9 @@ jobs:
   filesystem-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # TODO(pre-public): pin to full commit SHA
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Trivy — filesystem vulns + secrets (HARD GATE on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0 # TODO(pre-public): pin to full commit SHA
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -131,7 +131,7 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
       - name: Trivy — IaC / config misconfiguration (HARD GATE)
-        uses: aquasecurity/trivy-action@0.28.0 # TODO(pre-public): pin to full commit SHA
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           scan-type: config
           severity: HIGH,CRITICAL
@@ -143,16 +143,16 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4 # TODO(pre-public): pin to full commit SHA
-      - uses: github/codeql-action/init@v3 # TODO(pre-public): pin to full commit SHA
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         with:
           languages: javascript-typescript
-      - uses: github/codeql-action/analyze@v3 # TODO(pre-public): pin to full commit SHA
+      - uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
 
   container:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # TODO(pre-public): pin to full commit SHA
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build production image
         run: docker build -t ledger-payout-service:ci .
       - name: Verify image runs as non-root
@@ -166,7 +166,7 @@ jobs:
               if [ -e "$p" ]; then echo "unexpected $p in image"; exit 1; fi
             done'
       - name: Trivy — container image (HARD GATE on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0 # TODO(pre-public): pin to full commit SHA
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           scan-type: image
           image-ref: ledger-payout-service:ci

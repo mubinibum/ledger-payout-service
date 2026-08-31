@@ -6,6 +6,32 @@ the versions below track those milestones, not a released package.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/). The project
 is not published to a registry.
 
+## [Unreleased] — 2026-08-31 · M4.1 — History-sanitization verification & CI supply-chain pinning
+
+### Added
+
+- **All GitHub Actions in `.github/workflows/ci.yml` pinned to full 40-character immutable
+  commit SHAs** (`actions/checkout`, `actions/setup-node`, `actions/upload-artifact`,
+  `gitleaks/gitleaks-action`, `aquasecurity/trivy-action`, `github/codeql-action/{init,analyze}`),
+  each resolved read-only from its own upstream repository via `gh api`, with a
+  human-readable version kept as a trailing comment. Also fixed an invalid tag reference
+  (`aquasecurity/trivy-action@0.28.0` had no leading `v` and would have failed at run time).
+- `scripts/check-workflow.mjs` now requires every `uses:` to be a full 40-hex SHA (not just
+  "has an @ref") and fails on a leftover SHA-pinning TODO.
+- `package.json` `repository`/`homepage`/`bugs` and the OpenAPI `info.contact.url` now point
+  at the confirmed public target `github.com/mubinibum/ledger-payout-service` (the remote
+  itself does not exist yet — this batch created no remote, pushed nothing).
+
+### Found — NOT fixed automatically (by design)
+
+- **A manually-run git-history redaction of `scripts/scan-proprietary.mjs` (intended to
+  remove real company/brand names from history) was verified, read-only, to have had no
+  effect.** `HEAD`/all commit hashes are unchanged from the pre-redaction state, and a
+  full-reachable-history content scan still finds the local proprietary terms inside old
+  `scripts/scan-proprietary.mjs` blobs. No history rewrite was attempted in this batch (by
+  instruction). `docs/PUBLIC_RELEASE_CHECKLIST.md` status is `BLOCKED_FOR_PUBLIC_PUSH`.
+- Full-history gitleaks (16 commits): clean, no secrets. No real `.env` ever committed.
+
 ## [0.4.0] — 2026-08-31 · M4 — Public readiness, observability, security & documentation
 
 ### Added

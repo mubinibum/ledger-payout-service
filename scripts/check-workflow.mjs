@@ -6,7 +6,8 @@
  *   - top-level `permissions` must be present and read-only
  *   - a job may only widen `permissions` to `security-events: write` (CodeQL)
  *   - no hard security/audit gate may be neutered with `|| true`
- *   - every `uses:` must carry an `@ref`
+ *   - every `uses:` must be pinned to a full 40-character immutable commit SHA
+ *     (M4.1 — no branch, no tag, no short SHA), with a human-readable version comment
  *   - no `${{ secrets.* }}` reference (fork PRs must run the full pipeline)
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -42,8 +43,14 @@ for (const file of readdirSync(DIR).filter((f) => /\.ya?ml$/.test(f))) {
       if (!allowed) where(`job "${jobName}" grants write permissions: ${keys.join(', ')}`);
     }
     for (const step of job.steps ?? []) {
-      if (step.uses && !/@[\w.-]+$/.test(step.uses)) {
-        where(`job "${jobName}": \`uses: ${step.uses}\` has no @ref`);
+      if (step.uses) {
+        const at = step.uses.lastIndexOf('@');
+        const ref = at >= 0 ? step.uses.slice(at + 1) : '';
+        if (!/^[0-9a-f]{40}$/i.test(ref)) {
+          where(
+            `job "${jobName}": \`uses: ${step.uses}\` is not pinned to a full 40-char commit SHA`,
+          );
+        }
       }
       if (typeof step.run === 'string') {
         for (const line of step.run.split('\n')) {
@@ -53,6 +60,17 @@ for (const file of readdirSync(DIR).filter((f) => /\.ya?ml$/.test(f))) {
         }
       }
     }
+  }
+
+  // Every SHA-pinned `uses:` line must carry a human-readable version comment, and no
+  // TODO about pinning may remain.
+  for (const line of raw.split('\n')) {
+    if (/^\s*(?:-\s*)?uses:\s*\S+@[0-9a-f]{40}\s*$/i.test(line)) {
+      where(`line without a trailing version comment: ${line.trim()}`);
+    }
+  }
+  if (/TODO.*(?:SHA|pin)/i.test(raw)) {
+    where('leftover TODO about SHA pinning');
   }
 
   if (/\$\{\{\s*secrets\./.test(raw)) {
