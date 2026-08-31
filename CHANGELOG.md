@@ -6,6 +6,22 @@ the versions below track those milestones, not a released package.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/). The project
 is not published to a registry.
 
+## [Unreleased] — 2026-08-31 · M4.1.1 — Final post-redaction verification
+
+### Resolved
+
+- **The git-history redaction flagged as unresolved in M4.1 is now confirmed successful.**
+  The owner ran `git filter-repo --invert-paths` to remove `scripts/scan-proprietary.mjs`
+  from the entire history, then re-added only the already-sanitized version in one new
+  commit. Verified, read-only: every prior commit hash from the one that first added the
+  file is gone from the object database; the file's reachable history is now a single
+  commit; a full-reachable-blob scan (283 blobs) finds zero proprietary-term matches
+  anywhere in history; commit messages, tags, and path names are clean; full-history
+  gitleaks (18 commits) stays clean; `git fsck` is clean with no dangling objects. All
+  GitHub Action SHA pins and the finalized public metadata survived the rewrite intact.
+- `docs/PUBLIC_RELEASE_CHECKLIST.md` status raised to `READY_FOR_REMOTE_CREATION`. No code,
+  test, or business-invariant change — 192/192 tests still pass.
+
 ## [Unreleased] — 2026-08-31 · M4.1 — History-sanitization verification & CI supply-chain pinning
 
 ### Added
