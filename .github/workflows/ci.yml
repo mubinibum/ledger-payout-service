@@ -13,8 +13,18 @@
 #   - No secrets are referenced, so fork pull requests run the full pipeline safely. Nothing
 #     is uploaded except a non-sensitive SBOM and CodeQL SARIF.
 #   - Hard gates (production `npm audit`, gitleaks, proprietary scan, Trivy fs/config/image,
-#     license check) never use `|| true`. The dev-dependency audit is informational with a
-#     documented reason — see docs/DEPENDENCY_LICENSE_REVIEW.md.
+#     license check) never use `|| true` or `continue-on-error`. The dev-dependency audit is
+#     informational with a documented reason — see docs/DEPENDENCY_LICENSE_REVIEW.md.
+#   - Secret scanning (M4.2.1) calls the gitleaks CLI directly — see the comment on the
+#     secret-scan job for why gitleaks/gitleaks-action was dropped. The binary is fetched
+#     from an official GitHub release, pinned to an explicit version, and checksum-verified
+#     against gitleaks' own published SHA-256 file before it is ever executed — no installer
+#     is piped to a shell.
+#   - Trivy (aquasecurity/trivy-action) is pinned to v0.36.0 after v0.28.0's pinned SHA broke:
+#     that release's own composite action referenced aquasecurity/setup-trivy by a moving
+#     tag that was later deleted upstream. v0.36.0 pins its internal setup-trivy and
+#     actions/cache dependencies by SHA, which is the correct pattern and was verified
+#     read-only before pinning.
 
 name: ci
 
@@ -107,23 +117,44 @@ jobs:
           if-no-files-found: error
 
   secret-scan:
+    # Calls the gitleaks CLI directly instead of gitleaks/gitleaks-action (M4.2.1). The
+    # action's push-event diff heuristic computes a commit range from `before`..`after`;
+    # on the very first push of full history to a previously-empty repo, `before` resolves
+    # to the root commit and the action asks git for `<root>^..<head>`, which is invalid
+    # (the root commit has no parent) and fails the whole job. Running gitleaks ourselves
+    # scans the actual reachable history deterministically and sidesteps that heuristic
+    # entirely — the same command already verified clean locally throughout M4-M4.2.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0
-      - name: gitleaks — full history (HARD GATE)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+          fetch-depth: 0 # full history — required for the scan below to see every commit
+
+      - name: Install gitleaks (pinned release, checksum-verified — HARD GATE prerequisite)
         env:
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
-          GITLEAKS_ENABLE_SUMMARY: 'false'
+          GITLEAKS_VERSION: '8.30.1'
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -O "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          curl -sSfL -O "$base/$asset"
+          grep " ${asset}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" > gitleaks.sha256
+          sha256sum -c gitleaks.sha256
+          tar xzf "$asset" gitleaks
+          chmod +x gitleaks
+
+      - name: gitleaks — full reachable history (HARD GATE, deterministic CLI scan)
+        run: |
+          set -euo pipefail
+          ./gitleaks detect --source . --log-opts="--all" --redact --exit-code 1
 
   filesystem-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Trivy — filesystem vulns + secrets (HARD GATE on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -131,7 +162,7 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
       - name: Trivy — IaC / config misconfiguration (HARD GATE)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           severity: HIGH,CRITICAL
@@ -166,7 +197,7 @@ jobs:
               if [ -e "$p" ]; then echo "unexpected $p in image"; exit 1; fi
             done'
       - name: Trivy — container image (HARD GATE on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
           image-ref: ledger-payout-service:ci
