@@ -1,0 +1,21 @@
+# scripts/proprietary-terms.local.txt  — LOCAL, GITIGNORED
+#
+# Copy this file to  scripts/proprietary-terms.local.txt  and add the real names that must
+# never appear in this public repository: employer / client company names, internal product
+# brands, self-hosted service hostnames, internal DB schema names, and so on.
+#
+# The real file is gitignored on purpose. It restores full-strength scanning on the author's
+# machine and in a trusted CI (mount it as a secret file) without ever publishing the names.
+# An outside contributor who clones the repo simply runs the structural rules only.
+#
+# FORMAT
+#   - one JavaScript regular expression per line (matched case-insensitively)
+#   - blank lines and lines starting with `#` are ignored
+#   - `\b` word boundaries and `\s?` optional spaces are useful for name variants
+#
+# EXAMPLES (these are placeholders — replace with the actual strings)
+#   \bacme\s?corp\b
+#   \bwidgetpay\b
+#   \bgitlab\.acme\b
+#   \bacme\.co\.[a-z]{2}\b
+#   \binternalproductname\b

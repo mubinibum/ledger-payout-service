@@ -13,6 +13,13 @@ coverage/
 .env.*
 !.env.example
 
+# local proprietary-term list for scripts/scan-proprietary.mjs — real names, never committed
+scripts/proprietary-terms.local.txt
+
+# local-only generated artefacts (SBOM, benchmark output)
+/sbom.json
+/bench-results/
+
 # logs
 *.log
 logs/
