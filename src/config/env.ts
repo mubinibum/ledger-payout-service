@@ -5,85 +5,123 @@ import { z } from 'zod';
  * message if configuration is missing or malformed. No secrets are hard-coded — every
  * value comes from the environment (see .env.example for the template).
  */
-const EnvSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+const EnvSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    LOG_LEVEL: z
+      .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
+      .default('info'),
 
-  HTTP_HOST: z.string().min(1).default('127.0.0.1'),
-  HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    HTTP_HOST: z.string().min(1).default('127.0.0.1'),
+    HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
 
-  // Either DATABASE_URL, or the individual PG* parts below (DATABASE_URL wins).
-  DATABASE_URL: z.string().url().optional(),
-  PGHOST: z.string().min(1).default('127.0.0.1'),
-  PGPORT: z.coerce.number().int().min(1).max(65535).default(5432),
-  PGDATABASE: z.string().min(1).default('ledger'),
-  PGUSER: z.string().min(1).default('ledger'),
-  PGPASSWORD: z.string().min(1).default('change-me-locally'),
-  DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(15),
-  // How long a caller waits to borrow a pool connection under load before failing.
-  DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
+    // Prometheus exposition on GET /metrics. Default OFF — when false the route is not
+    // registered and any request returns 404. Enable only where the endpoint sits on a
+    // trusted network or behind an auth proxy. The exposition carries no PII or identifiers
+    // but does reveal internal traffic shape. See `src/modules/metrics`.
+    METRICS_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
 
-  // REDIS_URL wins over REDIS_HOST/REDIS_PORT when set.
-  REDIS_URL: z.string().url().optional(),
-  REDIS_HOST: z.string().min(1).default('127.0.0.1'),
-  REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
+    // Either DATABASE_URL, or the individual PG* parts below (DATABASE_URL wins).
+    DATABASE_URL: z.string().url().optional(),
+    PGHOST: z.string().min(1).default('127.0.0.1'),
+    PGPORT: z.coerce.number().int().min(1).max(65535).default(5432),
+    PGDATABASE: z.string().min(1).default('ledger'),
+    PGUSER: z.string().min(1).default('ledger'),
+    PGPASSWORD: z.string().min(1).default('change-me-locally'),
+    DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(15),
+    // How long a caller waits to borrow a pool connection under load before failing.
+    DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
 
-  READINESS_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(1500),
+    // REDIS_URL wins over REDIS_HOST/REDIS_PORT when set.
+    REDIS_URL: z.string().url().optional(),
+    REDIS_HOST: z.string().min(1).default('127.0.0.1'),
+    REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
 
-  // Number of times a transfer retries on a transient DB error (deadlock / serialization).
-  TRANSFER_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(3),
+    READINESS_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(1500),
 
-  // Dev/demo ONLY: the funding endpoint injects an opening balance via a balanced ledger
-  // transaction (credit target / debit the system account). Default is `false` — it must be
-  // turned on explicitly for local development or a demo, and must never be `true` in a real
-  // deployment (there is no such thing as free money in a real ledger).
-  ALLOW_FUNDING: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((v) => v === 'true'),
+    // Number of times a transfer retries on a transient DB error (deadlock / serialization).
+    TRANSFER_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(3),
 
-  // --- M3: payouts, outbox, worker, provider, webhooks, reconciliation ---
+    // Dev/demo ONLY: the funding endpoint injects an opening balance via a balanced ledger
+    // transaction (credit target / debit the system account). Default is `false` — it must be
+    // turned on explicitly for local development or a demo, and must never be `true` in a real
+    // deployment (there is no such thing as free money in a real ledger).
+    ALLOW_FUNDING: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
 
-  // Queue + worker.
-  PAYOUT_QUEUE_NAME: z.string().min(1).default('payout-jobs'),
-  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
-  WORKER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
-  WORKER_BACKOFF_MS: z.coerce.number().int().min(100).max(600_000).default(2_000),
+    // --- M3: payouts, outbox, worker, provider, webhooks, reconciliation ---
 
-  // Outbox publisher.
-  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).default(1_000),
-  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1_000).default(50),
-  OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
+    // Queue + worker.
+    PAYOUT_QUEUE_NAME: z.string().min(1).default('payout-jobs'),
+    WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
+    WORKER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+    WORKER_BACKOFF_MS: z.coerce.number().int().min(100).max(600_000).default(2_000),
 
-  // Provider adapter. `mock` is the only implementation in M3; a real adapter is out of scope.
-  PAYOUT_PROVIDER: z.enum(['mock']).default('mock'),
-  PROVIDER_BASE_URL: z.string().url().default('http://127.0.0.1:4000'),
-  PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(50).max(60_000).default(3_000),
+    // Outbox publisher.
+    OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).default(1_000),
+    OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1_000).default(50),
+    OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
 
-  // Inbound webhook verification. Secret has no default — the webhook route 503s without it.
-  WEBHOOK_SECRET: z.string().min(16).optional(),
-  WEBHOOK_TOLERANCE_SEC: z.coerce.number().int().min(1).max(3_600).default(300),
+    // Provider adapter. `mock` is the only implementation in M3; a real adapter is out of scope.
+    PAYOUT_PROVIDER: z.enum(['mock']).default('mock'),
+    PROVIDER_BASE_URL: z.string().url().default('http://127.0.0.1:4000'),
+    PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(50).max(60_000).default(3_000),
 
-  // Reconciliation.
-  RECONCILE_STALE_AFTER_SEC: z.coerce.number().int().min(1).max(86_400).default(120),
-  RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(1_000).default(50),
-  RECONCILE_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(20),
+    // Inbound webhook verification. Secret has no default — the webhook route 503s without it.
+    WEBHOOK_SECRET: z.string().min(16).optional(),
+    WEBHOOK_TOLERANCE_SEC: z.coerce.number().int().min(1).max(3_600).default(300),
 
-  // Alert threshold: a payout still holding reserved funds this long after creation is
-  // surfaced by the `payouts_reserved_beyond_threshold` gauge / runbook.
-  RESERVED_PAYOUT_ALERT_SEC: z.coerce.number().int().min(1).max(2_592_000).default(3_600),
+    // Reconciliation.
+    RECONCILE_STALE_AFTER_SEC: z.coerce.number().int().min(1).max(86_400).default(120),
+    RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(1_000).default(50),
+    RECONCILE_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(20),
 
-  // How long the outbox publisher waits for a single `queue.add` before giving up on it
-  // (and retrying the event next cycle). Keeps a hung Redis from holding a DB row lock.
-  OUTBOX_ENQUEUE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3_000),
+    // Alert threshold: a payout still holding reserved funds this long after creation is
+    // surfaced by the `payouts_reserved_beyond_threshold` gauge / runbook.
+    RESERVED_PAYOUT_ALERT_SEC: z.coerce.number().int().min(1).max(2_592_000).default(3_600),
 
-  // Mock provider process (local only).
-  MOCK_PROVIDER_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
-  MOCK_PROVIDER_WEBHOOK_URL: z
-    .string()
-    .url()
-    .default('http://127.0.0.1:3000/v1/webhooks/provider/payouts'),
-});
+    // How long the outbox publisher waits for a single `queue.add` before giving up on it
+    // (and retrying the event next cycle). Keeps a hung Redis from holding a DB row lock.
+    OUTBOX_ENQUEUE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3_000),
+
+    // Mock provider process (local only).
+    MOCK_PROVIDER_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+    MOCK_PROVIDER_WEBHOOK_URL: z
+      .string()
+      .url()
+      .default('http://127.0.0.1:3000/v1/webhooks/provider/payouts'),
+  })
+  // Fail-closed in production (M4 §13): a real deployment must not start with demo defaults
+  // or with safety-critical config missing. Development and test are unaffected.
+  .superRefine((env, ctx) => {
+    if (env.NODE_ENV !== 'production') return;
+    if (!env.WEBHOOK_SECRET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['WEBHOOK_SECRET'],
+        message: 'is required in production — the webhook endpoint must verify signatures',
+      });
+    }
+    if (env.ALLOW_FUNDING) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ALLOW_FUNDING'],
+        message: 'must be false in production — a real ledger has no endpoint that creates money',
+      });
+    }
+    if (!env.DATABASE_URL && env.PGPASSWORD === 'change-me-locally') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PGPASSWORD'],
+        message: 'is still the local placeholder — set a real value in production',
+      });
+    }
+  });
 
 export type Env = z.infer<typeof EnvSchema>;
 
