@@ -1,6 +1,6 @@
 # ADR 0021: Runtime hardening and fail-closed production config
 
-- **Status:** accepted (M4)
+- **Status:** accepted (M4); container section amended (M4.2.2)
 - **Date:** 2026-08-31
 
 ## Context
@@ -15,20 +15,37 @@ or missing safety-critical config.
 
 Multi-stage `Dockerfile`:
 
-- base pinned to `node:20.20.2-bookworm-slim` (a specific patch; a digest pin is a
-  pre-public checklist item);
-- build stage compiles TypeScript and prunes to production dependencies;
-- runtime stage carries only `dist/`, production `node_modules`, `package.json` +
-  `package-lock.json`, and `openapi/` — no source, no tests, no dev tooling, no `.env`,
-  no `.git` (a comprehensive `.dockerignore` + explicit `COPY`s);
+- base pinned to `node:20.20.2-bookworm-slim` at an **immutable manifest-list digest**
+  (`@sha256:2cf067...`, M4.2.2 — same Node version, resolved read-only via
+  `docker buildx imagetools inspect`; a manifest-list digest, not a single-arch one, so
+  multi-arch pulls still resolve to the right platform);
+- build stage compiles TypeScript and prunes to production dependencies (npm is used freely
+  here — it never ships in the runtime stage);
+- runtime stage runs a **minimal security upgrade** of the base image's OS packages
+  (`apt-get update && apt-get upgrade -y --no-install-recommends`, no new packages
+  installed, apt lists removed in the same layer) before dropping to the non-root user;
+- runtime stage **removes the npm CLI, npx, and Corepack from the filesystem** (not just the
+  `PATH`) — every runtime entry point is a plain `node <file>.js` and none of them ever
+  invoke npm; this also removed npm's own bundled transitive dependencies
+  (`tar`/`minimatch`/`glob`/etc.), which is what a container image scan had flagged;
+- runtime stage carries only `dist/`, production `node_modules`, `package.json`, and
+  `openapi/` — no `package-lock.json` (its only purpose, an in-image `npm audit`, no longer
+  applies once npm is gone), no source, no tests, no dev tooling, no `.env`, no `.git` (a
+  comprehensive `.dockerignore` + explicit `COPY`s);
 - runs as the non-root `node` user, `NODE_ENV=production`, `STOPSIGNAL SIGTERM`;
-- `HEALTHCHECK` uses `node -e fetch(...)` (no curl in the slim image);
+- `HEALTHCHECK` uses `node -e fetch(...)` (no curl, no npm, in the slim image);
 - writes nothing to disk → compatible with `--read-only --tmpfs /tmp --cap-drop ALL
   --security-opt no-new-privileges` (documented in the runbook);
 - one image, command-overridden for API / publisher / worker / migrations.
 
-Verified locally: non-root uid 1000, `npm audit --omit=dev` = 0 inside the image, no
-`test`/`.git`/`.env`/`src` present, healthcheck goes `healthy`, SIGTERM stops it in <1 s.
+Verified locally and in CI (`container` job): non-root uid 1000, `node` available, `npm`/
+`npx` absent from both the filesystem and `PATH`, no `test`/`.git`/`.env`/`src`/
+`package-lock.json` present, the app answers `/healthz` and its `HEALTHCHECK` goes
+`healthy`, `/metrics` is 404 by default and 200 when opted in, SIGTERM stops it in well
+under a second. A Trivy image scan (`severity HIGH,CRITICAL`, `exit-code 1`,
+`ignore-unfixed`) found **no HIGH or CRITICAL findings against this build** — that is a
+statement about one scan at one point in time, not a permanent guarantee; re-scan on every
+build, which CI already does.
 
 ### Fail-closed config (`env.ts` `superRefine`)
 
@@ -57,4 +74,10 @@ Development and test are unaffected. Fault injection already has no HTTP surface
   README quick-start uses `npm run dev` (development), so this is not a friction point.
 - The container test surface (`container` CI job) and `test/integration/production-guards.test.ts`
   lock in the hardening.
-- Base-image digest pinning and a distroless move remain open.
+- **No `npm`/`npx` inside a running production container** — an operator can no longer
+  `docker exec` into it and run an npm command for debugging; use the CLI locally against
+  the same image's `dist/` output, or add a one-off debug image if that is ever needed.
+- Digest pinning must be **re-resolved by hand** whenever the Node version is bumped (it is
+  not automatic) — a Dependabot/Renovate rule for this is still an open follow-up.
+- A distroless move remains open future work; `bookworm-slim` + non-root + no npm is the
+  current position.

@@ -6,6 +6,35 @@ the versions below track those milestones, not a released package.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/). The project
 is not published to a registry.
 
+## [Unreleased] — 2026-08-31 · M4.2.2 — Harden the final runtime image
+
+### Changed
+
+- **Base image pinned to an immutable manifest-list digest**:
+  `node:20.20.2-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0`,
+  resolved read-only from Docker Hub. Same Node version and Debian variant as before; a
+  manifest-list (not single-arch) digest so multi-arch builds keep working.
+- The runtime stage runs a minimal, targeted `apt-get upgrade` (no new packages installed,
+  apt lists removed in the same layer) to pick up OS-package security fixes not yet baked
+  into the pinned image build.
+- **The npm CLI, `npx`, and Corepack are removed from the runtime image's filesystem** — not
+  merely hidden from `PATH`. Every runtime entry point (`node dist/index.js`, the publisher,
+  the worker, migrations, the healthcheck) is already a plain `node` invocation; none of
+  them use npm. `package-lock.json` is no longer copied into the runtime stage either, since
+  its only prior purpose — an in-image `npm audit` — no longer applies.
+- `container` CI job gained automated checks: `node` is available; `npm`/`npx` are absent
+  from both the filesystem and `PATH`; the app starts and answers `/healthz`; `/metrics` is
+  404 by default; the Docker `HEALTHCHECK` reaches `healthy`; the process stays non-root.
+
+### Security
+
+- A Trivy image scan (`severity HIGH,CRITICAL`, `exit-code 1`, no ignore file, no lowered
+  severity) found **no HIGH or CRITICAL findings against this build** on 2026-08-31 — this
+  describes one scan of one build, not a permanent guarantee; the same gate re-runs on every
+  CI build. The findings it previously caught were OS packages awaiting the upgrade above,
+  and vulnerabilities inside npm's own bundled dependencies, which are gone now that npm
+  itself is gone from the image.
+
 ## [Unreleased] — 2026-08-31 · M4.1.1 — Final post-redaction verification
 
 ### Resolved

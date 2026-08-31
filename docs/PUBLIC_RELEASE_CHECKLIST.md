@@ -78,9 +78,15 @@ remains untracked.
 - [x] CycloneDX SBOM generates deterministically (`npm run sbom`).
 - [x] OpenAPI 3.1 spec valid and in sync with the routes (`npm run openapi:check` +
       `test/unit/openapi.test.ts`).
-- [x] Docker image builds; runs as non-root (`uid 1000`); `NODE_ENV=production`; in-image
-      `npm audit --omit=dev` = 0; no `test` / `.git` / `.env` / `src` in the image;
-      healthcheck reports `healthy`; SIGTERM stops it in <1 s.
+- [x] Docker image builds; base pinned to an immutable digest
+      (`node:20.20.2-bookworm-slim@sha256:2cf067...`, M4.2.2); runs as non-root (`uid 1000`);
+      `NODE_ENV=production`; npm/npx/Corepack removed from the runtime filesystem (not just
+      `PATH` — verified); OS packages carry a minimal `apt-get upgrade`; no `test` / `.git` /
+      `.env` / `src` / `package-lock.json` in the image; app answers `/healthz`, healthcheck
+      reports `healthy`, `/metrics` is 404 by default; SIGTERM stops it in well under 1 s. A
+      Trivy image scan (`HIGH,CRITICAL`, `exit-code 1`, no ignore file) found no HIGH/CRITICAL
+      findings against this build — a point-in-time result, re-checked on every CI run, not a
+      standing guarantee.
 - [x] `.github/workflows/ci.yml` — `permissions: contents: read`; gitleaks (full history),
       Trivy (fs/config/image), CodeQL, container verification, SBOM + license gates; no
       `|| true` on any hard gate; **every `uses:` pinned to a full 40-character immutable
@@ -92,10 +98,11 @@ remains untracked.
 ## 4. Follow-ups before enabling public CI — NOT BLOCKING the push
 
 - [x] ~~Re-pin every third-party GitHub Action to a full commit SHA~~ — done.
+- [x] ~~Pin the Docker base image to a digest~~ — done (M4.2.2).
 - [ ] Enable `npm audit signatures` / provenance verification.
 - [ ] Add Dependabot or Renovate (incl. the Node base-image digest, and to keep the SHA pins
-      current as upstream actions release new versions).
-- [ ] Pin the Docker base image to a digest.
+      current as upstream actions release new versions) — the digest must currently be
+      re-resolved by hand whenever the Node version is bumped.
 - [ ] Confirm Trivy / CodeQL / gitleaks actually run green on the remote (they cannot run
       locally; configuration was validated statically).
 - [ ] Decide on a distroless runtime base (future hardening).

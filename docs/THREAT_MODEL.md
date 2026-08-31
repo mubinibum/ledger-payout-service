@@ -265,15 +265,23 @@ checklist); no `npm` provenance/attestation verification; transitive typosquat r
 **T20 — Container escape / privilege in the runtime image.**
 Likelihood: low · Impact: high.
 *Mitigation:* runs as non-root `node` (uid 1000, verified), `NODE_ENV=production`, no
-package manager invoked at runtime, no shell in `CMD`, slim Debian base, no Docker socket,
-minimal file set (dist + prod node_modules + package files + openapi). Compatible with
+package manager invoked at runtime, no shell in `CMD`, slim Debian base pinned to an
+immutable digest, no Docker socket, minimal file set (dist + prod node_modules +
+`package.json` + openapi — M4.2.2 also dropped `package-lock.json`). Compatible with
 `--read-only` + `--cap-drop ALL` + `--security-opt no-new-privileges` (documented in the
-runbook).
-*Residual:* the base image still ships a libc and coreutils; no distroless; no seccomp
-profile authored here.
-*Future:* distroless/`node:*-slim` → distroless, seccomp/AppArmor profile, read-only root
-enforced by the orchestrator.
-*Verification:* `container` CI job; local `docker run` verification recorded in the M4 report.
+runbook). **M4.2.2:** the npm CLI, `npx`, and Corepack are removed from the runtime
+filesystem (not just `PATH`) — they were never invoked at runtime and their own bundled
+dependencies were the source of most vulnerabilities a container image scan had found; base
+image OS packages also receive a minimal `apt-get upgrade` in the same stage.
+*Residual:* the base image still ships a libc, coreutils, and a shell (`sh`) — no
+distroless; no seccomp profile authored here; a Trivy scan is a point-in-time result, not a
+standing guarantee, and a newly-disclosed CVE in an already-shipped package would not be
+caught until the next scan/rebuild.
+*Future:* distroless base, seccomp/AppArmor profile, read-only root enforced by the
+orchestrator, automated base-image digest refresh (Renovate/Dependabot).
+*Verification:* `container` CI job (non-root, npm/npx absence from the filesystem, app
+start + healthcheck, Trivy image scan); local `docker run` verification recorded in the
+M4.2.2 report.
 
 ---
 
